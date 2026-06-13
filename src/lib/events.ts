@@ -2,12 +2,15 @@
 // viewer can replay the whole run) and (2) published to a Redis channel that
 // the SSE route fans out to connected browsers — the "Matrix log stream".
 import { prisma } from "./db";
+import { env } from "./env";
 import { getPublisher, scanChannel } from "./redis";
 import type { Emit, LiveEvent, Severity } from "./types";
 
 export function createEmitter(scanId: string): { emit: Emit; seq: () => number } {
   let counter = 0;
-  const pub = getPublisher();
+  // In serverless mode there is no Redis; the SSE route fans out by polling
+  // Postgres, so we only persist (below) and skip publishing.
+  const pub = env.serverless ? null : getPublisher();
 
   const emit: Emit = async (partial) => {
     const seq = counter++;
@@ -63,8 +66,17 @@ export function createEmitter(scanId: string): { emit: Emit; seq: () => number }
       console.error("event persist error", err);
     }
 
-    await pub.publish(scanChannel(scanId), JSON.stringify(event));
+    if (pub) await pub.publish(scanChannel(scanId), JSON.stringify(event));
   };
 
   return { emit, seq: () => counter };
+}
+
+// Stateless emitter: assigns sequence numbers and forwards events straight to
+// the SSE writer. No DB, no Redis — used by the DB-less serverless demo.
+export function statelessEmitter(send: (e: LiveEvent) => void): Emit {
+  let counter = 0;
+  return async (partial) => {
+    send({ ...partial, seq: counter++, at: new Date().toISOString() } as LiveEvent);
+  };
 }

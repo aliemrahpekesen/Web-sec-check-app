@@ -1,0 +1,43 @@
+# Auto-deploy to Vercel on push to the feature branch.
+#
+# Requires three repository secrets (Settings → Secrets and variables → Actions):
+#   VERCEL_TOKEN       — a Vercel access token (vercel.com/account/tokens)
+#   VERCEL_ORG_ID      — from `.vercel/project.json` after `vercel link`, or the team id
+#   VERCEL_PROJECT_ID  — the Vercel project id
+#
+# The public demo runs in stateless mode (no database): VERCEL=1 is set
+# automatically, and with no DATABASE_URL the app runs each scan entirely inside
+# the SSE request. To enable the Claude Opus 4.8 engine, add an ANTHROPIC_API_KEY
+# environment variable in the Vercel project settings.
+name: Deploy to Vercel
+
+on:
+  push:
+    branches:
+      - claude/security-scanner-app-gh89nr
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Pull Vercel environment
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}

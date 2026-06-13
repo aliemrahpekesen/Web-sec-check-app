@@ -8,8 +8,11 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Pooled (pgbouncer) connections can't run migrations; DIRECT_URL is used for
+  // migrate/diff. On non-pooled setups, point both at the same URL.
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------------------------------------------------------------------------

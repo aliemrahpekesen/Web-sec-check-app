@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { env, stateless } from "@/lib/env";
 import { getDefaultOrg } from "@/lib/org";
 import { getScanQueue } from "@/lib/queue";
 import { createScanSchema } from "@/lib/validation";
 import { normalizeTarget, isLikelyPrivate } from "@/lib/url";
 import { isAllowlisted, makeToken } from "@/lib/verify";
+import { encodeScanId } from "@/lib/scanid";
 
 export const runtime = "nodejs";
 
@@ -36,6 +38,13 @@ export async function POST(req: Request) {
       { error: "Özel/iç ağ adresleri taranamaz (SSRF koruması)." },
       { status: 400 },
     );
+  }
+
+  // Stateless demo (no DB): the whole scan runs inside the SSE stream; encode
+  // the parameters into the opaque scan id and return immediately.
+  if (stateless()) {
+    const id = encodeScanId({ target: url, host, profile });
+    return NextResponse.json({ id, target: url, origin, profile, status: "QUEUED" }, { status: 201 });
   }
 
   const org = await getDefaultOrg();
@@ -76,11 +85,15 @@ export async function POST(req: Request) {
     data: { scansThisPeriod: { increment: 1 } },
   });
 
-  await getScanQueue().add(
-    "scan",
-    { scanId: scan.id, target: url, host, profile },
-    { jobId: scan.id },
-  );
+  // Self-hosted: hand off to the BullMQ worker. Serverless: the scan is run
+  // inline by the SSE stream route when the client connects (no worker/Redis).
+  if (!env.serverless) {
+    await getScanQueue().add(
+      "scan",
+      { scanId: scan.id, target: url, host, profile },
+      { jobId: scan.id },
+    );
+  }
 
   return NextResponse.json(
     { id: scan.id, target: url, origin, profile, status: scan.status },
@@ -90,6 +103,7 @@ export async function POST(req: Request) {
 
 // GET /api/scans — recent scans for the org.
 export async function GET() {
+  if (stateless()) return NextResponse.json({ scans: [] });
   const org = await getDefaultOrg();
   const scans = await prisma.scan.findMany({
     where: { organizationId: org.id },

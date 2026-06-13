@@ -96,6 +96,21 @@ kütüphaneler. Her bulgu CWE + OWASP eşlemesi ve **örnekli düzeltme** içeri
 gelecekteki kimlik doğrulama ve ölçümlü ücretlendirme için hazırdır; v1'de auth/ödeme yoktur ve tüm
 etkinlik tek bir demo organizasyonuna atfedilir (`src/lib/org.ts`).
 
+## Dağıtım modları
+
+SentinelScan iki modda çalışır:
+
+- **Self-hosted (tam):** Postgres + Redis + ayrı worker. Kalıcı tarama geçmişi,
+  çok kiracılı, ölçeklenebilir. Yukarıdaki "Hızlı başlangıç".
+- **Stateless (serverless/Vercel):** Veritabanı/Redis/worker yok. Her tarama tek
+  bir SSE isteğinin içinde koşar; loglar ve bulgular canlı akar, sonunda rapor
+  üretilir; hiçbir şey kalıcılaştırılmaz. Vercel'de otomatik devreye girer
+  (`VERCEL=1` + `DATABASE_URL` tanımsız). `ANTHROPIC_API_KEY` eklenirse AI motoru
+  burada da çalışır. `SENTINEL_INLINE=true` ile zorlanabilir.
+
+`.github/workflows/deploy.yml` her push'ta Vercel'e otomatik dağıtım yapar
+(gerekli secret'lar dosyada belgelenmiştir).
+
 ## Üretim notları
 
 - Worker'ı `npm run worker:prod` ile çalıştırın; birden çok kopya başlatın.

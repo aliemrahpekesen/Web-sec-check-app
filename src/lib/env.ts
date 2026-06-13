@@ -23,6 +23,14 @@ export const env = {
   appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
   scanAllowlist: list(process.env.SENTINEL_SCAN_ALLOWLIST),
   skipVerification: bool(process.env.SENTINEL_SKIP_VERIFICATION, false),
+  // Serverless mode (Vercel): no Redis/worker. Scans run inline inside the SSE
+  // route. Auto-detected on Vercel, or forced via SENTINEL_INLINE=true.
+  serverless: bool(process.env.SENTINEL_INLINE, false) || !!process.env.VERCEL,
 };
+
+// Stateless mode: serverless with no database. The whole scan happens inside
+// one SSE request — logs/findings stream live and nothing is persisted. This
+// is how the public Vercel demo runs (no Postgres credential needed).
+export const stateless = (): boolean => env.serverless && env.databaseUrl.trim().length === 0;
 
 export const aiEnabled = (): boolean => env.anthropicApiKey.trim().length > 0;

@@ -1,19 +1,28 @@
 import { prisma } from "@/lib/db";
+import { env, stateless } from "@/lib/env";
+import { statelessEmitter } from "@/lib/events";
 import { createSubscriber, scanChannel } from "@/lib/redis";
-import type { LiveEvent } from "@/lib/types";
+import { runScan, runScanStateless } from "@/lib/scanner/run";
+import { decodeScanId } from "@/lib/scanid";
+import type { LiveEvent, LogLevel, ScanProfile } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Serverless: the scan runs inline inside this request, so give it room.
+export const maxDuration = 60;
 
 // GET /api/scans/:id/stream — Server-Sent Events feed of the live scan log.
-// Replays persisted logs first (so late/reconnecting viewers see history),
-// then tails the Redis pub/sub channel until the scan finishes.
+// Replays persisted logs first (so late/reconnecting viewers see history), then:
+//   • self-hosted: tails the Redis pub/sub channel until the scan finishes;
+//   • serverless (Vercel): claims a QUEUED scan, runs it inline, and fans out
+//     the log by polling Postgres (no Redis/worker).
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
   const scanId = params.id;
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
+      let lastSeq = -1;
       const send = (event: Partial<LiveEvent>) => {
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -21,8 +30,47 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
           /* controller closed */
         }
       };
+      // ----- Stateless demo: decode id, run inline, stream directly -----
+      if (stateless()) {
+        const p = decodeScanId(scanId);
+        if (!p) {
+          send({ type: "done", status: "FAILED", message: "Geçersiz tarama kimliği" });
+          controller.close();
+          return;
+        }
+        const hb = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`: ping\n\n`));
+          } catch {
+            /* closed */
+          }
+        }, 15_000);
+        const emit = statelessEmitter((e) => send(e));
+        try {
+          await runScanStateless(p.target, p.host, p.profile, emit);
+        } finally {
+          clearInterval(hb);
+          try {
+            controller.close();
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
 
-      // 1. Replay history from the database.
+      const sendLog = (log: { seq: number; at: Date; level: string; message: string }) => {
+        send({
+          type: "log",
+          seq: log.seq,
+          at: log.at.toISOString(),
+          level: log.level as LogLevel,
+          message: log.message,
+        });
+        if (log.seq > lastSeq) lastSeq = log.seq;
+      };
+
+      // 1. Replay history.
       const scan = await prisma.scan.findUnique({
         where: { id: scanId },
         include: { logs: { orderBy: { seq: "asc" } } },
@@ -32,18 +80,10 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
         controller.close();
         return;
       }
-      for (const log of scan.logs) {
-        send({
-          type: "log",
-          seq: log.seq,
-          at: log.at.toISOString(),
-          level: log.level as LiveEvent["level"],
-          message: log.message,
-        });
-      }
+      for (const log of scan.logs) sendLog(log);
 
-      // If the scan already finished, emit a terminal event and close.
-      if (["COMPLETED", "FAILED", "CANCELLED"].includes(scan.status)) {
+      const terminal = (s: string) => ["COMPLETED", "FAILED", "CANCELLED"].includes(s);
+      if (terminal(scan.status)) {
         send({
           type: "done",
           status: scan.status,
@@ -54,7 +94,74 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
         return;
       }
 
-      // 2. Tail live events from Redis.
+      // ----- Serverless: run inline + poll Postgres -----
+      if (env.serverless) {
+        // Atomically claim a QUEUED scan so only one connection runs it.
+        const claim = await prisma.scan.updateMany({
+          where: { id: scanId, status: "QUEUED" },
+          data: { status: "RUNNING", startedAt: new Date() },
+        });
+        if (claim.count === 1) {
+          void runScan({
+            scanId,
+            target: scan.target,
+            host: scan.host,
+            profile: scan.profile as ScanProfile,
+          });
+        }
+
+        let closed = false;
+        const cleanup = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(poll);
+          clearInterval(heartbeat);
+          try {
+            controller.close();
+          } catch {
+            /* ignore */
+          }
+        };
+
+        const poll = setInterval(async () => {
+          try {
+            const logs = await prisma.scanLog.findMany({
+              where: { scanId, seq: { gt: lastSeq } },
+              orderBy: { seq: "asc" },
+            });
+            for (const log of logs) sendLog(log);
+
+            const fresh = await prisma.scan.findUnique({
+              where: { id: scanId },
+              select: { status: true, riskScore: true, grade: true },
+            });
+            if (fresh && terminal(fresh.status)) {
+              send({
+                type: "done",
+                status: fresh.status,
+                riskScore: fresh.riskScore ?? undefined,
+                grade: fresh.grade ?? undefined,
+              });
+              cleanup();
+            }
+          } catch {
+            /* transient DB hiccup; next tick retries */
+          }
+        }, 1000);
+
+        const heartbeat = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`: ping\n\n`));
+          } catch {
+            cleanup();
+          }
+        }, 15_000);
+
+        setTimeout(cleanup, (maxDuration - 2) * 1000);
+        return;
+      }
+
+      // ----- Self-hosted: tail Redis pub/sub -----
       const sub = createSubscriber();
       let closed = false;
       const cleanup = async () => {
@@ -85,7 +192,6 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
       });
       await sub.subscribe(scanChannel(scanId));
 
-      // Keep-alive comments so proxies don't drop the idle connection.
       const heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(`: ping\n\n`));
@@ -94,7 +200,6 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
         }
       }, 15_000);
 
-      // Safety net: never hang forever.
       setTimeout(() => void cleanup(), 10 * 60 * 1000);
     },
   });
