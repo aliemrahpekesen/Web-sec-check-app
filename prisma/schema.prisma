@@ -1,0 +1,173 @@
+// SentinelScan data model.
+// Multi-tenant + billing-ready from day one, even though v1 has no auth/payment.
+// Everything hangs off Organization so the SaaS surface can grow without a
+// schema rewrite.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy & billing scaffolding
+// ---------------------------------------------------------------------------
+
+enum PlanTier {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      PlanTier @default(FREE)
+
+  // Usage accounting — the hook for future metered/seat billing.
+  monthlyScanQuota Int @default(50)
+  scansThisPeriod  Int @default(0)
+
+  apiKeys           ApiKey[]
+  scans             Scan[]
+  verifiedDomains   VerifiedDomain[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ApiKey {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  // Store only a hash of the key, never the key itself.
+  hashedKey      String       @unique
+  prefix         String // first 8 chars, shown in UI for identification
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+}
+
+// Domain-ownership proof. Active scanning is gated on a verified domain.
+model VerifiedDomain {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  host           String
+  method         VerificationMethod
+  token          String
+  verifiedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, host])
+  @@index([host])
+}
+
+enum VerificationMethod {
+  DNS_TXT
+  HTTP_FILE
+}
+
+// ---------------------------------------------------------------------------
+// Scans & findings
+// ---------------------------------------------------------------------------
+
+enum ScanStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ScanProfile {
+  PASSIVE // headers, TLS, cookies, info disclosure only
+  STANDARD // passive + crawl + light active probes
+  DEEP // standard + broader crawl + more probes
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+model Scan {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  target   String // normalized target URL
+  host     String
+  profile  ScanProfile @default(STANDARD)
+  status   ScanStatus  @default(QUEUED)
+
+  // How the scan ran: "ai" (Claude Opus 4.8 dynamic workflow) or "deterministic".
+  engine String @default("deterministic")
+
+  // Aggregate scores filled in on completion.
+  riskScore  Int? // 0-100
+  grade      String? // A..F
+  pagesCrawled  Int @default(0)
+  requestsMade  Int @default(0)
+
+  error String?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  findings Finding[]
+  logs     ScanLog[]
+
+  @@index([organizationId])
+  @@index([status])
+}
+
+model Finding {
+  id     String @id @default(cuid())
+  scanId String
+  scan   Scan   @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  // Stable identifier of the check that produced this (e.g. "missing-csp").
+  checkId  String
+  title    String
+  severity Severity
+  cwe      String? // e.g. "CWE-693"
+  owasp    String? // e.g. "A05:2021 Security Misconfiguration"
+
+  location    String // URL / endpoint where it was observed
+  description String  @db.Text
+  evidence    String? @db.Text // raw proof (header value, payload reflection, ...)
+  remediation String  @db.Text // how to fix, with example
+  confidence  String  @default("firm") // tentative | firm | confirmed
+
+  createdAt DateTime @default(now())
+
+  @@index([scanId])
+  @@index([severity])
+}
+
+// Append-only event log — also the source of the live "Matrix" stream replay.
+model ScanLog {
+  id     String  @id @default(cuid())
+  scanId String
+  scan   Scan    @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  seq    Int
+  level  String // info | step | tool | finding | warn | error | success
+  message String @db.Text
+  meta    Json?
+  at      DateTime @default(now())
+
+  @@index([scanId, seq])
+}

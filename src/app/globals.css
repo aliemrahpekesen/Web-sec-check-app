@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* System font stacks — no network font fetch, so builds work offline. */
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  background: #03060a;
+  color: #c8f5e0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle CRT scanline overlay for the futuristic feel. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 255, 156, 0.03) 0px,
+    rgba(0, 255, 156, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  z-index: 50;
+  mix-blend-mode: screen;
+}
+
+::selection {
+  background: rgba(0, 255, 156, 0.3);
+  color: #eafff5;
+}
+
+/* Thin neon scrollbar. */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(0, 255, 156, 0.25);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.glass {
+  background: rgba(6, 20, 16, 0.55);
+  border: 1px solid rgba(0, 255, 156, 0.18);
+  backdrop-filter: blur(10px);
+}
+
+.text-glow {
+  text-shadow: 0 0 12px rgba(0, 255, 156, 0.55);
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(0, 255, 156, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 156, 0.06) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
