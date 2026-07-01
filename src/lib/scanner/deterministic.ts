@@ -2,6 +2,7 @@
 // sensible order. This is the fallback engine when no Anthropic API key is
 // configured — and the backbone the AI orchestrator reuses as tools.
 import { httpGet, RequestBudget } from "./http";
+import { env } from "../env";
 import {
   analyzeSecurityHeaders,
   analyzeCookies,
@@ -9,6 +10,8 @@ import {
   analyzeTls,
   analyzeMixedContent,
   analyzeDirectoryListing,
+  analyzeSri,
+  analyzeCacheControl,
   checkSensitivePaths,
   analyzeCors,
   probeReflectedXss,
@@ -40,7 +43,8 @@ export async function deterministicScan(
   profile: ScanProfile,
   emit: Emit,
 ): Promise<EngineResult> {
-  const budget = new RequestBudget(profile === "DEEP" ? 400 : profile === "STANDARD" ? 200 : 40);
+  const ttl = env.serverless ? 55_000 : profile === "DEEP" ? 240_000 : 120_000;
+  const budget = new RequestBudget(profile === "DEEP" ? 400 : profile === "STANDARD" ? 200 : 40, ttl);
   const origin = new URL(target).origin;
   const findings: FindingDraft[] = [];
   const push = async (fs: FindingDraft[]) => {
@@ -63,6 +67,8 @@ export async function deterministicScan(
   await push(analyzeCookies(root));
   await push(analyzeMixedContent(root));
   await push(analyzeDirectoryListing(root));
+  await push(analyzeSri(root));
+  await push(analyzeCacheControl(root));
 
   await emit({ type: "log", level: "step", message: "HTTPS zorlaması kontrol ediliyor…" });
   await push(await analyzeHttpsRedirect(host, budget));

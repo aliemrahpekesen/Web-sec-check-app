@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { SeverityBadge } from "./SeverityBadge";
 import type { Severity } from "@/lib/types";
+import { buildJsonReport, buildMarkdownReport, type ReportMeta } from "@/lib/report";
 
 export interface FindingRow {
   id: string;
@@ -62,6 +63,29 @@ export function Report({
 
   const total = scan.findings.length;
 
+  function download(kind: "json" | "md") {
+    const meta: ReportMeta = {
+      target: scan!.target,
+      host: scan!.host,
+      profile: scan!.profile,
+      engine: scan!.engine,
+      riskScore: scan!.riskScore,
+      grade: scan!.grade,
+      pagesCrawled: scan!.pagesCrawled,
+      requestsMade: scan!.requestsMade,
+      generatedAt: new Date().toISOString(),
+    };
+    const content =
+      kind === "json" ? buildJsonReport(meta, scan!.findings) : buildMarkdownReport(meta, scan!.findings);
+    const blob = new Blob([content], { type: kind === "json" ? "application/json" : "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sentinelscan-${scan!.host}-${Date.now()}.${kind === "json" ? "json" : "md"}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="flex flex-col gap-4">
       {/* Header / score */}
@@ -97,6 +121,23 @@ export function Report({
             </div>
           ))}
         </div>
+
+        {!running && (
+          <div className="mt-4 flex gap-2">
+            <button
+              onClick={() => download("md")}
+              className="rounded-lg border border-matrix/30 bg-black/30 px-3 py-1.5 font-mono text-xs text-matrix transition hover:border-matrix/60 hover:bg-matrix/10"
+            >
+              ⬇ Markdown rapor
+            </button>
+            <button
+              onClick={() => download("json")}
+              className="rounded-lg border border-matrix/30 bg-black/30 px-3 py-1.5 font-mono text-xs text-matrix transition hover:border-matrix/60 hover:bg-matrix/10"
+            >
+              ⬇ JSON rapor
+            </button>
+          </div>
+        )}
 
         {scan.status === "FAILED" && (
           <div className="mt-3 rounded border border-sev-critical/40 bg-sev-critical/10 p-2 font-mono text-xs text-sev-critical">

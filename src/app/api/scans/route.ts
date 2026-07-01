@@ -7,11 +7,21 @@ import { createScanSchema } from "@/lib/validation";
 import { normalizeTarget, isLikelyPrivate } from "@/lib/url";
 import { isAllowlisted, makeToken } from "@/lib/verify";
 import { encodeScanId } from "@/lib/scanid";
+import { assertPublicHost, SsrfError } from "@/lib/ssrf";
+import { rateLimit, clientIp } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 
 // POST /api/scans — enqueue a scan.
 export async function POST(req: Request) {
+  const rl = rateLimit(`scan:${clientIp(req)}`);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Çok fazla istek. Biraz sonra tekrar deneyin." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } },
+    );
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -38,6 +48,14 @@ export async function POST(req: Request) {
       { error: "Özel/iç ağ adresleri taranamaz (SSRF koruması)." },
       { status: 400 },
     );
+  }
+  // Authoritative SSRF check: resolves DNS and rejects hosts that point at any
+  // internal address (defeats DNS-rebinding and IP-encoding bypasses).
+  try {
+    await assertPublicHost(host);
+  } catch (e) {
+    const message = e instanceof SsrfError ? e.message : "Hedef doğrulanamadı";
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 
   // Stateless demo (no DB): the whole scan runs inside the SSE stream; encode

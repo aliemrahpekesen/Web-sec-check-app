@@ -4,11 +4,19 @@ import { getDefaultOrg } from "@/lib/org";
 import { verifySchema } from "@/lib/validation";
 import { normalizeTarget } from "@/lib/url";
 import { makeToken, verifyDomain, VERIFICATION_PATH, DNS_PREFIX } from "@/lib/verify";
+import { rateLimit, clientIp } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 
 // POST /api/verify — issue an ownership-proof token + instructions for a host.
 export async function POST(req: Request) {
+  const rl = rateLimit(`verify:${clientIp(req)}`);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Çok fazla istek." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } },
+    );
+  }
   const parsed = verifySchema.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) {
     return NextResponse.json({ error: "Geçersiz host" }, { status: 400 });
