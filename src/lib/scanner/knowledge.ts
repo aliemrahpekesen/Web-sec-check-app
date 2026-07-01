@@ -88,6 +88,51 @@ export const KB: Record<string, KnowledgeEntry> = {
     remediation:
       "Kullanmadığınız özellikleri kapatın:\n\n  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()\n",
   },
+  "weak-csp": {
+    title: "Zayıf Content-Security-Policy",
+    severity: "MEDIUM",
+    cwe: "CWE-1021",
+    owasp: "A05:2021 Security Misconfiguration",
+    description:
+      "CSP mevcut ancak zayıf yönergeler içeriyor (ör. script-src 'unsafe-inline'/'unsafe-eval', joker '*' kaynak, ya da object-src kilidi yok). Bu durumda enjekte edilen scriptler yine çalışabilir; CSP'nin XSS koruması büyük ölçüde etkisiz kalır.",
+    remediation:
+      "'unsafe-inline'/'unsafe-eval' yerine nonce/hash + 'strict-dynamic' kullanın ve kaynakları kısıtlayın:\n\n" +
+      "  Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<rastgele>' 'strict-dynamic'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'\n\n" +
+      "Her yanıtta yeni nonce üretin. Önce Report-Only ile ölçüp sonra zorunlu moda geçin.",
+  },
+  "insecure-samesite-none": {
+    title: "SameSite=None çerezi Secure bayrağı olmadan",
+    severity: "MEDIUM",
+    cwe: "CWE-614",
+    owasp: "A05:2021 Security Misconfiguration",
+    description:
+      "Bir çerez SameSite=None ile ayarlanmış ama Secure bayrağı yok. Modern tarayıcılar SameSite=None çerezleri yalnızca Secure ise kabul eder; aksi halde çerez düz HTTP'de sızabilir ve CSRF korumasını kaybeder.",
+    remediation: "SameSite=None kullanıyorsanız Secure'u da ekleyin:\n\n  Set-Cookie: session=...; SameSite=None; Secure; HttpOnly; Path=/\n\n" +
+      "Çapraz-site akışı gerekmiyorsa SameSite=Lax veya Strict tercih edin.",
+  },
+  "tls-untrusted": {
+    title: "Geçersiz/güvenilmeyen TLS sertifikası",
+    severity: "HIGH",
+    cwe: "CWE-295",
+    owasp: "A02:2021 Cryptographic Failures",
+    description:
+      "Sunucunun TLS sertifikası doğrulanamadı (kendinden imzalı, süresi dolmuş, ana bilgisayar adı uyuşmuyor veya bilinmeyen CA). Tarayıcılar bağlantıyı engeller; kullanıcılar uyarıya maruz kalır ve MITM riski artar.",
+    remediation:
+      "Güvenilir bir CA'dan (ör. Let's Encrypt) geçerli, host adıyla eşleşen bir sertifika kurun ve tam zinciri (fullchain) sunun:\n\n  certbot --nginx -d example.com\n\n" +
+      "Otomatik yenilemeyi (certbot renew) etkinleştirin.",
+  },
+  "sri-missing": {
+    title: "Dış scriptlerde Subresource Integrity (SRI) yok",
+    severity: "LOW",
+    cwe: "CWE-353",
+    owasp: "A08:2021 Software and Data Integrity Failures",
+    description:
+      "Sayfa, başka bir origin'den (ör. CDN) integrity özniteliği olmadan script yüklüyor. CDN ele geçirilir veya değiştirilirse, sayfada keyfi kod çalışabilir.",
+    remediation:
+      "Dış script/stil etiketlerine SRI hash'i ve crossorigin ekleyin:\n\n" +
+      "  <script src=\"https://cdn.example.com/lib.js\"\n          integrity=\"sha384-<hash>\" crossorigin=\"anonymous\"></script>\n\n" +
+      "Hash üretimi:  openssl dgst -sha384 -binary lib.js | openssl base64 -A",
+  },
   "insecure-cookie": {
     title: "Çerez güvenlik bayrakları eksik (Secure / HttpOnly / SameSite)",
     severity: "MEDIUM",

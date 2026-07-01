@@ -5,6 +5,7 @@
 import tls from "node:tls";
 import { httpGet, type HttpResult, type RequestBudget } from "./http";
 import { kbEntry } from "./knowledge";
+import { assertPublicHost } from "../ssrf";
 import type { FindingDraft, Severity } from "../types";
 
 function mk(
@@ -64,6 +65,24 @@ export function analyzeSecurityHeaders(res: HttpResult): FindingDraft[] {
   if (!h["referrer-policy"]) out.push(mk("missing-referrer-policy", at));
   if (!h["permissions-policy"]) out.push(mk("missing-permissions-policy", at));
 
+  // CSP present but weak: unsafe-inline/unsafe-eval on scripts, wildcard
+  // sources, or no object-src lock. Presence alone is not protection.
+  if (csp) {
+    const weaknesses: string[] = [];
+    const scriptSrc = /script-src[^;]*/i.exec(csp)?.[0] ?? "";
+    if (/'unsafe-inline'/i.test(scriptSrc) && !/'nonce-|'strict-dynamic'|'sha(256|384|512)-/i.test(scriptSrc)) {
+      weaknesses.push("script-src 'unsafe-inline' (nonce/hash olmadan)");
+    }
+    if (/'unsafe-eval'/i.test(scriptSrc)) weaknesses.push("script-src 'unsafe-eval'");
+    if (/(?:default|script)-src[^;]*\*(?![.\w])/i.test(csp)) weaknesses.push("joker (*) kaynak");
+    if (!/object-src/i.test(csp) && !/default-src[^;]*'none'/i.test(csp)) {
+      weaknesses.push("object-src 'none' yok");
+    }
+    if (weaknesses.length) {
+      out.push(mk("weak-csp", at, { evidence: `Zayıf yönergeler:\n- ${weaknesses.join("\n- ")}` }));
+    }
+  }
+
   const server = h["server"];
   const powered = h["x-powered-by"];
   if ((server && /\d/.test(server)) || powered) {
@@ -81,17 +100,22 @@ export function analyzeSecurityHeaders(res: HttpResult): FindingDraft[] {
 // --- Cookies -----------------------------------------------------------------
 
 export function analyzeCookies(res: HttpResult): FindingDraft[] {
-  // fetch() collapses multiple Set-Cookie into one comma-joined string; split
-  // carefully on the cookie boundary.
-  const raw = res.headers["set-cookie"];
-  if (!raw) return [];
+  // Prefer the properly-split Set-Cookie array (fetch collapses multiple
+  // Set-Cookie into one comma-joined string, which mangles `Expires=` dates).
+  const cookies =
+    res.setCookies.length > 0
+      ? res.setCookies
+      : res.headers["set-cookie"]
+        ? res.headers["set-cookie"].split(/,(?=[^;]+?=)/)
+        : [];
+  if (!cookies.length) return [];
   const isHttps = res.finalUrl.startsWith("https://");
-  const cookies = raw.split(/,(?=[^;]+?=)/);
   const out: FindingDraft[] = [];
   for (const c of cookies) {
     const name = c.split("=")[0]?.trim() ?? "cookie";
     const missing: string[] = [];
-    if (isHttps && !/;\s*secure/i.test(c)) missing.push("Secure");
+    const hasSecure = /;\s*secure/i.test(c);
+    if (isHttps && !hasSecure) missing.push("Secure");
     if (!/;\s*httponly/i.test(c)) missing.push("HttpOnly");
     if (!/;\s*samesite/i.test(c)) missing.push("SameSite");
     if (missing.length) {
@@ -99,6 +123,16 @@ export function analyzeCookies(res: HttpResult): FindingDraft[] {
         mk("insecure-cookie", res.finalUrl, {
           titleSuffix: ` — «${name}»`,
           evidence: `Set-Cookie: ${c.trim()}\nEksik bayraklar: ${missing.join(", ")}`,
+        }),
+      );
+    }
+    // SameSite=None *requires* Secure, or the browser rejects it and it becomes
+    // a CSRF/leak vector.
+    if (/;\s*samesite\s*=\s*none/i.test(c) && !hasSecure) {
+      out.push(
+        mk("insecure-samesite-none", res.finalUrl, {
+          titleSuffix: ` — «${name}»`,
+          evidence: `Set-Cookie: ${c.trim()}`,
         }),
       );
     }
@@ -129,6 +163,8 @@ export async function analyzeHttpsRedirect(host: string, budget: RequestBudget):
 interface TlsInfo {
   protocol?: string;
   validTo?: Date;
+  authorized?: boolean;
+  authorizationError?: string;
   error?: string;
 }
 
@@ -140,14 +176,20 @@ function inspectTls(host: string): Promise<TlsInfo> {
       done = true;
       resolve(r);
     };
+    // rejectUnauthorized:false so we can *inspect* invalid certs and report
+    // them; we capture socket.authorized to know whether the chain validated.
     const socket = tls.connect(
       { host, port: 443, servername: host, rejectUnauthorized: false },
       () => {
         const cert = socket.getPeerCertificate();
         const protocol = socket.getProtocol() ?? undefined;
         const validTo = cert?.valid_to ? new Date(cert.valid_to) : undefined;
+        const authorized = socket.authorized;
+        const authorizationError = socket.authorizationError
+          ? String(socket.authorizationError)
+          : undefined;
         socket.end();
-        finish({ protocol, validTo });
+        finish({ protocol, validTo, authorized, authorizationError });
       },
     );
     socket.setTimeout(8000, () => {
@@ -159,9 +201,26 @@ function inspectTls(host: string): Promise<TlsInfo> {
 }
 
 export async function analyzeTls(host: string): Promise<FindingDraft[]> {
+  // Defence-in-depth: never open a raw TLS socket to an internal host.
+  try {
+    await assertPublicHost(host);
+  } catch {
+    return [];
+  }
   const info = await inspectTls(host);
   if (info.error) return [];
   const out: FindingDraft[] = [];
+
+  // Untrusted/invalid certificate (self-signed, expired, hostname mismatch,
+  // unknown CA). Browsers hard-block these.
+  if (info.authorized === false && info.authorizationError) {
+    out.push(
+      mk("tls-untrusted", `https://${host}`, {
+        evidence: `Sertifika doğrulaması başarısız: ${info.authorizationError}`,
+        confidence: "confirmed",
+      }),
+    );
+  }
 
   if (info.validTo) {
     const daysLeft = Math.floor((info.validTo.getTime() - Date.now()) / 86_400_000);
@@ -205,6 +264,51 @@ export function analyzeMixedContent(res: HttpResult): FindingDraft[] {
   return [
     mk("mixed-content", res.finalUrl, {
       evidence: matches.join("\n"),
+    }),
+  ];
+}
+
+// --- Subresource Integrity ---------------------------------------------------
+
+export function analyzeSri(res: HttpResult): FindingDraft[] {
+  if (!res.body) return [];
+  let origin: string;
+  try {
+    origin = new URL(res.finalUrl).origin;
+  } catch {
+    return [];
+  }
+  const tags = res.body.match(/<script\b[^>]*\bsrc\s*=\s*["'][^"']+["'][^>]*>/gi) ?? [];
+  const bad: string[] = [];
+  for (const tag of tags) {
+    const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+    if (!src) continue;
+    let abs: URL;
+    try {
+      abs = new URL(src, res.finalUrl);
+    } catch {
+      continue;
+    }
+    if (abs.origin === origin) continue; // same-origin scripts don't need SRI
+    if (/\bintegrity\s*=/i.test(tag)) continue;
+    bad.push(abs.toString());
+    if (bad.length >= 5) break;
+  }
+  if (!bad.length) return [];
+  return [mk("sri-missing", res.finalUrl, { evidence: `Bütünlük (SRI) olmayan dış scriptler:\n${bad.join("\n")}` })];
+}
+
+// --- Cache-Control on sensitive responses ------------------------------------
+
+export function analyzeCacheControl(res: HttpResult): FindingDraft[] {
+  const cc = res.headers["cache-control"] ?? "";
+  // Only meaningful when the response looks authenticated/sensitive.
+  const sensitive = res.setCookies.length > 0 || /<input[^>]+type\s*=\s*["']?password/i.test(res.body);
+  if (!sensitive) return [];
+  if (/no-store|private/i.test(cc)) return [];
+  return [
+    mk("missing-cache-control", res.finalUrl, {
+      evidence: cc ? `Cache-Control: ${cc}` : "Cache-Control başlığı yok (oturum çerezi/parola alanı mevcut).",
     }),
   ];
 }

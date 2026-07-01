@@ -1,6 +1,7 @@
 // Live-event plumbing: every scan step is (1) persisted to Postgres (so a late
 // viewer can replay the whole run) and (2) published to a Redis channel that
 // the SSE route fans out to connected browsers — the "Matrix log stream".
+import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { env } from "./env";
 import { getPublisher, scanChannel } from "./redis";
@@ -29,8 +30,7 @@ export function createEmitter(scanId: string): { emit: Emit; seq: () => number }
             seq,
             level: event.level ?? (event.type === "status" ? "step" : "info"),
             message: event.message ?? event.status ?? "",
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            meta: (event.meta ?? undefined) as any,
+            meta: (event.meta ?? undefined) as Prisma.InputJsonValue | undefined,
           },
         });
       } else if (event.type === "finding" && event.finding) {

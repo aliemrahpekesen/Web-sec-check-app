@@ -47,7 +47,7 @@ export async function crawl(
   const scripts = new Set<string>();
   const apiEndpoints = new Set<string>();
 
-  while (queue.length && pages.length < maxPages) {
+  while (queue.length && pages.length < maxPages && !budget.expired()) {
     const url = queue.shift()!;
     const res = await httpGet(url, { budget });
     if (res.error || !res.body) {

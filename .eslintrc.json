@@ -1,0 +1,8 @@
+{
+  "extends": "next/core-web-vitals",
+  "ignorePatterns": ["node_modules/", ".next/", "prisma/migrations/"],
+  "rules": {
+    "@next/next/no-img-element": "off",
+    "react/jsx-no-comment-textnodes": "off"
+  }
+}

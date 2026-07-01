@@ -78,17 +78,35 @@ doğrulaması** zorunludur:
 - **Dosya:** `https://<host>/.well-known/sentinel-verification.txt` içinde token
 
 Doğrulama akışı arayüzde otomatik sunulur. **PASSIVE** profil yalnızca verilen URL'nin
-başlık/TLS/çerez analizini yaptığı için doğrulama gerektirmez. Özel/iç ağ adresleri (SSRF) reddedilir.
-Yerel geliştirmede `SENTINEL_SKIP_VERIFICATION=true` veya `SENTINEL_SCAN_ALLOWLIST=host1,host2`
-kullanın — yalnızca yetkili olduğunuz hedefler için.
+başlık/TLS/çerez analizini yaptığı için doğrulama gerektirmez.
+
+**Doğrulama token'ı** sunucu tarafı bir sırla (`SENTINEL_VERIFICATION_SECRET`) HMAC'lenir ve
+sabit-zamanlı karşılaştırılır — genel girdilerden yeniden üretilemez. Prod'da bu sırrı mutlaka ayarlayın.
+
+**SSRF koruması** (`src/lib/ssrf.ts`) her giden istekte uygulanır: host DNS ile çözülür ve çözülen
+*tüm* IP'ler kontrol edilir; özel/iç aralıklar (RFC1918, loopback, link-local + bulut metadata
+`169.254.169.254`, CGNAT, IPv6 ULA/mapped), ondalık/hex/oktal IP kodlamaları (`http://2130706433`)
+ve **yönlendirme zincirinin her adımı** reddedilir. Stateless mod dahil tüm giriş noktaları bu kontrolü
+çalıştırır.
+
+**Kötüye kullanım kontrolü:** tarama/doğrulama uçlarında IP başına dakikalık **rate limit**
+(`SENTINEL_RATE_LIMIT_PER_MIN`), her taramada istek + duvar-saati **zaman bütçesi** (serverless'ta
+~55s içinde güvenle biter).
+
+Yerel geliştirmede `SENTINEL_SKIP_VERIFICATION=true`, `SENTINEL_SCAN_ALLOWLIST=host1,host2` ya da
+iç hedefler için `SENTINEL_ALLOW_PRIVATE_TARGETS=true` kullanın — yalnızca yetkili olduğunuz hedefler için.
 
 ## Denetlenen açıklar (özet)
 
-Güvenlik başlıkları (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer/Permissions-Policy),
-çerez bayrakları, HTTPS zorlaması, TLS/sertifika, karışık içerik, dizin listeleme, hassas dosya ifşası
-(.env/.git/yedek), sunucu sürüm ifşası, tehlikeli CORS, yansıyan XSS, açık yönlendirme, eski/savunmasız
-kütüphaneler. Her bulgu CWE + OWASP eşlemesi ve **örnekli düzeltme** içerir (bkz.
-`src/lib/scanner/knowledge.ts`).
+Güvenlik başlıkları (HSTS, CSP + **CSP kalite analizi**, X-Frame-Options, X-Content-Type-Options,
+Referrer/Permissions-Policy), çerez bayrakları (Secure/HttpOnly/SameSite + **SameSite=None-Secure**),
+HTTPS zorlaması, TLS protokolü/sertifika süresi + **geçersiz/güvenilmeyen sertifika**, karışık içerik,
+dizin listeleme, hassas dosya ifşası (.env/.git/yedek), sunucu sürüm ifşası, tehlikeli CORS, yansıyan XSS,
+açık yönlendirme, eski/savunmasız kütüphaneler, **dış scriptlerde eksik SRI**, hassas yanıtta önbellek
+kontrolü. Her bulgu CWE + OWASP eşlemesi ve **örnekli düzeltme** içerir (bkz. `src/lib/scanner/knowledge.ts`).
+
+Uygulamanın kendisi de sıkı güvenlik header'ları uygular: nonce'lu CSP (`src/middleware.ts`) + HSTS,
+X-Frame-Options, nosniff, Referrer/Permissions/COOP (`next.config.mjs`). Dogfood: `/.well-known/security.txt`.
 
 ## SaaS / ücretlendirme altyapısı
 
@@ -111,8 +129,24 @@ SentinelScan iki modda çalışır:
 `.github/workflows/deploy.yml` her push'ta Vercel'e otomatik dağıtım yapar
 (gerekli secret'lar dosyada belgelenmiştir).
 
+## Test & CI
+
+```bash
+npm test        # Vitest birim testleri (SSRF, URL, analizörler, skorlama, doğrulama, rapor…)
+npm run typecheck
+npm run lint
+```
+
+`.github/workflows/ci.yml` her push/PR'da typecheck + lint + test + build çalıştırır.
+
+## Rapor dışa aktarımı
+
+Tarama sayfasında bulgular **Markdown** veya **JSON** olarak indirilebilir
+(`src/lib/report.ts`; stateless modda tamamen istemci tarafında üretilir).
+
 ## Üretim notları
 
 - Worker'ı `npm run worker:prod` ile çalıştırın; birden çok kopya başlatın.
+- Sağlık kontrolü: `GET /api/health` (DB modlarında veritabanı bağlantısını da doğrular).
 - `riskScore`/`grade` tamamlanınca hesaplanır (`src/lib/scanner/scoring.ts`).
 - SSE bağlantısı koparsa tarayıcı yeniden bağlanır; sunucu geçmişi tekrarlar ve `seq` ile tekilleştirir.

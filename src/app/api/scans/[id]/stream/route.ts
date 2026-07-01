@@ -4,6 +4,8 @@ import { statelessEmitter } from "@/lib/events";
 import { createSubscriber, scanChannel } from "@/lib/redis";
 import { runScan, runScanStateless } from "@/lib/scanner/run";
 import { decodeScanId } from "@/lib/scanid";
+import { isLikelyPrivate } from "@/lib/url";
+import { assertPublicHost } from "@/lib/ssrf";
 import type { LiveEvent, LogLevel, ScanProfile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -35,6 +37,20 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
         const p = decodeScanId(scanId);
         if (!p) {
           send({ type: "done", status: "FAILED", message: "Geçersiz tarama kimliği" });
+          controller.close();
+          return;
+        }
+        // The scan id is attacker-controllable, so re-validate the target here
+        // (the POST-time SSRF check is bypassed when the id is hand-crafted).
+        if (isLikelyPrivate(p.host)) {
+          send({ type: "done", status: "FAILED", message: "Özel/iç ağ adresleri taranamaz (SSRF koruması)." });
+          controller.close();
+          return;
+        }
+        try {
+          await assertPublicHost(p.host);
+        } catch (e) {
+          send({ type: "done", status: "FAILED", message: e instanceof Error ? e.message : "Hedef doğrulanamadı" });
           controller.close();
           return;
         }

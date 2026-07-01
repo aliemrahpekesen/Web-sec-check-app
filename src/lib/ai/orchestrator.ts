@@ -16,6 +16,8 @@ import {
   analyzeCookies,
   analyzeMixedContent,
   analyzeDirectoryListing,
+  analyzeSri,
+  analyzeCacheControl,
   analyzeHttpsRedirect,
   analyzeTls,
   analyzeCors,
@@ -154,7 +156,8 @@ export async function aiOrchestratedScan(
   emit: Emit,
 ): Promise<EngineResult> {
   const client = new Anthropic({ apiKey: env.anthropicApiKey });
-  const budget = new RequestBudget(profile === "DEEP" ? 400 : profile === "STANDARD" ? 220 : 50);
+  const ttl = env.serverless ? 55_000 : profile === "DEEP" ? 240_000 : 120_000;
+  const budget = new RequestBudget(profile === "DEEP" ? 400 : profile === "STANDARD" ? 220 : 50, ttl);
   const origin = new URL(target).origin;
   const findings: FindingDraft[] = [];
   let pagesCrawled = 1;
@@ -204,6 +207,8 @@ export async function aiOrchestratedScan(
           ...analyzeCookies(res),
           ...analyzeMixedContent(res),
           ...analyzeDirectoryListing(res),
+          ...analyzeSri(res),
+          ...analyzeCacheControl(res),
         ];
         const added = await record(fs);
         return JSON.stringify({ recordedFindings: added.map(slim), headers: res.headers });
@@ -258,8 +263,8 @@ export async function aiOrchestratedScan(
 
   const maxIterations = profile === "DEEP" ? 30 : 20;
   for (let i = 0; i < maxIterations; i++) {
-    if (budget.count >= budget.max) {
-      await emit({ type: "log", level: "warn", message: "İstek bütçesi doldu; tarama sonlandırılıyor." });
+    if (budget.count >= budget.max || budget.expired()) {
+      await emit({ type: "log", level: "warn", message: "İstek/zaman bütçesi doldu; tarama sonlandırılıyor." });
       break;
     }
 
