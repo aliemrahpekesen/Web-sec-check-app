@@ -146,8 +146,10 @@ model Finding {
   checkId  String
   title    String
   severity Severity
+  category String? // check category (headers, tls, injection, disclosure, ...)
   cwe      String? // e.g. "CWE-693"
   owasp    String? // e.g. "A05:2021 Security Misconfiguration"
+  references String[] // reference URLs (MDN/OWASP/CVE)
 
   location    String // URL / endpoint where it was observed
   description String  @db.Text

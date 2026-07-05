@@ -1,40 +1,22 @@
-// Deterministic scanning pipeline. Runs the full analyzer suite in a fixed,
-// sensible order. This is the fallback engine when no Anthropic API key is
-// configured — and the backbone the AI orchestrator reuses as tools.
-import { httpGet, RequestBudget } from "./http";
+// Deterministic scanning engine, now catalog-driven: collect evidence once,
+// then run the full check catalog (400+ checks) over it. Produces findings AND
+// a coverage report (checks run / passed / failed per category) so the UI can
+// prove how much was actually verified. This is the fallback engine when no
+// Anthropic key is set — and the shared backbone the AI orchestrator builds on.
+import { RequestBudget } from "./http";
 import { env } from "../env";
-import {
-  analyzeSecurityHeaders,
-  analyzeCookies,
-  analyzeHttpsRedirect,
-  analyzeTls,
-  analyzeMixedContent,
-  analyzeDirectoryListing,
-  analyzeSri,
-  analyzeCacheControl,
-  checkSensitivePaths,
-  analyzeCors,
-  probeReflectedXss,
-  probeOpenRedirect,
-  detectOutdatedLibraries,
-} from "./analyzers";
-import { crawl } from "./crawler";
+import { collectEvidence } from "./checks/evidence";
+import { runChecks } from "./checks/engine";
+import { checksForProfile } from "./checks/registry";
+import { CATEGORY_LABELS } from "./checks/types";
+import type { Coverage } from "./checks/types";
 import type { Emit, FindingDraft, ScanProfile } from "../types";
 
 export interface EngineResult {
   findings: FindingDraft[];
   pagesCrawled: number;
   requestsMade: number;
-}
-
-function paramUrls(urls: string[]): string[] {
-  return urls.filter((u) => {
-    try {
-      return [...new URL(u).searchParams.keys()].length > 0;
-    } catch {
-      return false;
-    }
-  });
+  coverage?: Coverage;
 }
 
 export async function deterministicScan(
@@ -43,88 +25,48 @@ export async function deterministicScan(
   profile: ScanProfile,
   emit: Emit,
 ): Promise<EngineResult> {
-  const ttl = env.serverless ? 55_000 : profile === "DEEP" ? 240_000 : 120_000;
-  const budget = new RequestBudget(profile === "DEEP" ? 400 : profile === "STANDARD" ? 200 : 40, ttl);
-  const origin = new URL(target).origin;
+  const ttl = env.serverless ? 55_000 : profile === "DEEP" ? 300_000 : 150_000;
+  const maxReq = profile === "DEEP" ? 800 : profile === "STANDARD" ? 400 : 60;
+  const budget = new RequestBudget(maxReq, ttl);
+
+  const ev = await collectEvidence(target, host, profile, budget, emit);
+  if (!ev) return { findings: [], pagesCrawled: 0, requestsMade: budget.count };
+
+  const checks = checksForProfile(profile);
+  await emit({ type: "log", level: "step", message: `${checks.length} güvenlik kontrolü değerlendiriliyor…` });
+
+  const { findings: catFindings, coverage } = runChecks(checks, ev);
+
   const findings: FindingDraft[] = [];
-  const push = async (fs: FindingDraft[]) => {
-    for (const f of fs) {
-      findings.push(f);
-      await emit({ type: "finding", finding: f });
-    }
-  };
-
-  await emit({ type: "log", level: "step", message: `Hedef alınıyor: ${target}` });
-  const root = await httpGet(target, { budget });
-  if (root.error) {
-    await emit({ type: "log", level: "error", message: `Hedefe ulaşılamadı: ${root.error}` });
-    return { findings, pagesCrawled: 0, requestsMade: budget.count };
-  }
-  await emit({ type: "log", level: "tool", message: `kök yanıt ▸ ${root.status} ${root.finalUrl}` });
-
-  await emit({ type: "log", level: "step", message: "Güvenlik başlıkları analiz ediliyor…" });
-  await push(analyzeSecurityHeaders(root));
-  await push(analyzeCookies(root));
-  await push(analyzeMixedContent(root));
-  await push(analyzeDirectoryListing(root));
-  await push(analyzeSri(root));
-  await push(analyzeCacheControl(root));
-
-  await emit({ type: "log", level: "step", message: "HTTPS zorlaması kontrol ediliyor…" });
-  await push(await analyzeHttpsRedirect(host, budget));
-
-  await emit({ type: "log", level: "step", message: "TLS/sertifika denetleniyor…" });
-  await push(await analyzeTls(host));
-
-  await emit({ type: "log", level: "step", message: "CORS politikası test ediliyor…" });
-  await push(await analyzeCors(target, budget));
-
-  let pagesCrawled = 1;
-  let crawlLinks: string[] = [];
-  let scripts: string[] = [];
-
-  if (profile !== "PASSIVE") {
-    const maxPages = profile === "DEEP" ? 40 : 15;
-    await emit({ type: "log", level: "step", message: `Site taranıyor (en fazla ${maxPages} sayfa)…` });
-    const c = await crawl(target, budget, maxPages, emit);
-    pagesCrawled = c.pages.length;
-    crawlLinks = c.links;
-    scripts = c.scripts;
-    await emit({
-      type: "log",
-      level: "info",
-      message: `Keşfedildi: ${c.pages.length} sayfa, ${c.links.length} bağlantı, ${c.forms.length} form, ${c.scripts.length} script, ${c.apiEndpoints.length} API ucu`,
-      meta: { apiEndpoints: c.apiEndpoints.slice(0, 25) },
-    });
-
-    await emit({ type: "log", level: "step", message: "Hassas dosya/dizinler aranıyor…" });
-    await push(await checkSensitivePaths(origin, budget));
-
-    await emit({ type: "log", level: "step", message: "Eski kütüphaneler taranıyor…" });
-    await push(detectOutdatedLibraries(scripts));
-
-    // Active injection probes on URLs that carry parameters + form fields.
-    const targets = paramUrls([target, ...crawlLinks]).slice(0, profile === "DEEP" ? 20 : 8);
-    if (targets.length) {
-      await emit({ type: "log", level: "step", message: `Yansıyan XSS / açık yönlendirme test ediliyor (${targets.length} uç)…` });
-      for (const t of targets) {
-        const params = [...new URL(t).searchParams.keys()];
-        await push(await probeReflectedXss(t, params, budget));
-        await push(await probeOpenRedirect(t, budget));
-      }
-    }
-
-    // Probe form GET actions too.
-    for (const f of c.forms.filter((f) => f.method === "GET" && f.inputs.length).slice(0, 5)) {
-      await push(await probeReflectedXss(f.action, f.inputs, budget));
-    }
+  for (const f of catFindings) {
+    const draft: FindingDraft = {
+      checkId: f.checkId,
+      title: f.title,
+      severity: f.severity,
+      cwe: f.cwe,
+      owasp: f.owasp,
+      location: f.location,
+      description: f.description,
+      evidence: f.evidence,
+      remediation: f.remediation,
+      confidence: f.confidence,
+      category: f.category,
+      references: f.references,
+    };
+    findings.push(draft);
+    await emit({ type: "finding", finding: draft });
   }
 
+  // Per-category coverage line, so the live log shows verified-good coverage.
+  const parts = Object.entries(coverage.byCategory)
+    .map(([cat, c]) => `${CATEGORY_LABELS[cat as keyof typeof CATEGORY_LABELS] ?? cat}: ${c.failed}/${c.run}`)
+    .join(" · ");
+  await emit({ type: "log", level: "info", message: `Kapsam — ${parts}` });
   await emit({
     type: "log",
     level: "success",
-    message: `Tarama tamamlandı. ${findings.length} bulgu, ${budget.count} istek, ${pagesCrawled} sayfa.`,
+    message: `Tarama tamamlandı. ${coverage.total} kontrol koştu, ${coverage.passed} geçti, ${findings.length} bulgu, ${budget.count} istek.`,
   });
 
-  return { findings, pagesCrawled, requestsMade: budget.count };
+  return { findings, pagesCrawled: ev.pages.length, requestsMade: budget.count, coverage };
 }

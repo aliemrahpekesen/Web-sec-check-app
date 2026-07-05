@@ -7,13 +7,23 @@ export interface ReportFinding {
   checkId: string;
   title: string;
   severity: Severity;
+  category?: string | null;
   cwe?: string | null;
   owasp?: string | null;
+  references?: string[] | null;
   location: string;
   description: string;
   evidence?: string | null;
   remediation: string;
   confidence?: string | null;
+}
+
+export interface ReportCoverage {
+  total: number;
+  passed: number;
+  failed: number;
+  notApplicable: number;
+  byCategory: Record<string, { run: number; passed: number; failed: number }>;
 }
 
 export interface ReportMeta {
@@ -36,12 +46,12 @@ export function countBySeverity(findings: ReportFinding[]): Record<Severity, num
   return counts;
 }
 
-export function buildJsonReport(meta: ReportMeta, findings: ReportFinding[]): string {
+export function buildJsonReport(meta: ReportMeta, findings: ReportFinding[], coverage?: ReportCoverage): string {
   return JSON.stringify(
     {
       tool: "SentinelScan",
       meta,
-      summary: { total: findings.length, bySeverity: countBySeverity(findings) },
+      summary: { total: findings.length, bySeverity: countBySeverity(findings), coverage: coverage ?? null },
       findings,
     },
     null,
@@ -49,7 +59,7 @@ export function buildJsonReport(meta: ReportMeta, findings: ReportFinding[]): st
   );
 }
 
-export function buildMarkdownReport(meta: ReportMeta, findings: ReportFinding[]): string {
+export function buildMarkdownReport(meta: ReportMeta, findings: ReportFinding[], coverage?: ReportCoverage): string {
   const counts = countBySeverity(findings);
   const engineLabel = meta.engine === "ai" ? "Claude Opus 4.8 dinamik iş akışı" : "deterministik";
   const lines: string[] = [];
@@ -71,6 +81,19 @@ export function buildMarkdownReport(meta: ReportMeta, findings: ReportFinding[])
   lines.push(`| **Toplam** | **${findings.length}** |`);
   lines.push("");
 
+  if (coverage) {
+    lines.push(`## Denetim Kapsamı`);
+    lines.push("");
+    lines.push(`**${coverage.total}** kontrol koştu · **${coverage.passed}** geçti · **${coverage.failed}** bulgu üretti · ${coverage.notApplicable} uygulanamaz.`);
+    lines.push("");
+    lines.push(`| Kategori | Koşan | Geçen | Bulgu |`);
+    lines.push(`| --- | ---: | ---: | ---: |`);
+    for (const [cat, c] of Object.entries(coverage.byCategory).sort((a, b) => b[1].failed - a[1].failed)) {
+      lines.push(`| ${cat} | ${c.run} | ${c.passed} | ${c.failed} |`);
+    }
+    lines.push("");
+  }
+
   if (findings.length === 0) {
     lines.push(`Bu profil için bulgu yok. ✓`);
     return lines.join("\n");
@@ -81,7 +104,7 @@ export function buildMarkdownReport(meta: ReportMeta, findings: ReportFinding[])
   for (const f of sorted) {
     lines.push("");
     lines.push(`### [${f.severity}] ${f.title}`);
-    const tags = [f.cwe, f.owasp, f.confidence ? `güven: ${f.confidence}` : null].filter(Boolean);
+    const tags = [f.category, f.cwe, f.owasp, f.confidence ? `güven: ${f.confidence}` : null].filter(Boolean);
     if (tags.length) lines.push(`*${tags.join(" · ")}*`);
     lines.push("");
     lines.push(`- **Konum:** ${f.location}`);
@@ -100,6 +123,9 @@ export function buildMarkdownReport(meta: ReportMeta, findings: ReportFinding[])
     lines.push("```");
     lines.push(f.remediation);
     lines.push("```");
+    if (f.references && f.references.length) {
+      lines.push(`- **Referanslar:** ${f.references.map((r) => `<${r}>`).join(" · ")}`);
+    }
   }
   return lines.join("\n");
 }

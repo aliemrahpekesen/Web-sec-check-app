@@ -37,6 +37,8 @@ export interface FindingDraft {
   evidence?: string;
   remediation: string;
   confidence?: "tentative" | "firm" | "confirmed";
+  category?: string;
+  references?: string[];
 }
 
 // A single observation produced by an analyzer/tool. The orchestrator (AI or

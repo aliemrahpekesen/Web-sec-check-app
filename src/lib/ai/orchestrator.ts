@@ -28,6 +28,10 @@ import {
 } from "../scanner/analyzers";
 import { kbEntry } from "../scanner/knowledge";
 import type { EngineResult } from "../scanner/deterministic";
+import { collectEvidence } from "../scanner/checks/evidence";
+import { runChecks } from "../scanner/checks/engine";
+import { checksForProfile } from "../scanner/checks/registry";
+import type { Coverage } from "../scanner/checks/types";
 import type { Emit, FindingDraft, ScanProfile, Severity } from "../types";
 
 const SYSTEM = `Sen SentinelScan'in kıdemli sızma test uzmanı (offensive security) ajanısın.
@@ -162,6 +166,8 @@ export async function aiOrchestratedScan(
   const findings: FindingDraft[] = [];
   let pagesCrawled = 1;
 
+  let coverage: Coverage | undefined;
+
   const record = async (fs: FindingDraft[]): Promise<FindingDraft[]> => {
     const added: FindingDraft[] = [];
     for (const f of fs) {
@@ -173,6 +179,38 @@ export async function aiOrchestratedScan(
     }
     return added;
   };
+
+  // Comprehensive baseline: run the full deterministic catalog first, so the AI
+  // engine is always a *superset* of the 400+ checks. Claude then reasons on top
+  // (novel issues via report_finding, deeper probing of interesting endpoints).
+  try {
+    await emit({ type: "log", level: "step", message: "Kapsamlı kontrol kataloğu (baz çizgi) çalıştırılıyor…" });
+    const ev = await collectEvidence(target, host, profile, budget, emit);
+    if (ev) {
+      const { findings: cat, coverage: cov } = runChecks(checksForProfile(profile), ev);
+      coverage = cov;
+      pagesCrawled = Math.max(pagesCrawled, ev.pages.length);
+      await record(
+        cat.map((f) => ({
+          checkId: f.checkId,
+          title: f.title,
+          severity: f.severity,
+          cwe: f.cwe,
+          owasp: f.owasp,
+          location: f.location,
+          description: f.description,
+          evidence: f.evidence,
+          remediation: f.remediation,
+          confidence: f.confidence,
+          category: f.category,
+          references: f.references,
+        })),
+      );
+      await emit({ type: "log", level: "info", message: `Baz çizgi: ${cov.total} kontrol, ${findings.length} bulgu. AI orkestratör derinleştiriyor…` });
+    }
+  } catch {
+    /* baseline is best-effort; the AI loop still runs */
+  }
 
   async function runTool(name: string, input: Record<string, unknown>): Promise<string> {
     await emit({ type: "log", level: "tool", message: `claude ▸ ${name}(${shortArgs(input)})` });
@@ -321,7 +359,7 @@ export async function aiOrchestratedScan(
     message: `Dinamik iş akışı tamamlandı. ${findings.length} bulgu, ${budget.count} istek, ${pagesCrawled} sayfa.`,
   });
 
-  return { findings, pagesCrawled, requestsMade: budget.count };
+  return { findings, pagesCrawled, requestsMade: budget.count, coverage };
 }
 
 // ---- helpers ----------------------------------------------------------------
