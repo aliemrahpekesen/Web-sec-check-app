@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { MatrixRain } from "./MatrixRain";
-import { Report, type FullScan, type FindingRow } from "./Report";
+import { Report, type FullScan, type FindingRow, type CoverageData } from "./Report";
 import type { FindingDraft, LiveEvent, LogLevel, Severity } from "@/lib/types";
 
 interface LogLine {
@@ -41,8 +41,10 @@ function draftToRow(f: FindingDraft): FindingRow {
     checkId: f.checkId,
     title: f.title,
     severity: f.severity,
+    category: f.category ?? null,
     cwe: f.cwe ?? null,
     owasp: f.owasp ?? null,
+    references: f.references ?? null,
     location: f.location,
     description: f.description,
     evidence: f.evidence ?? null,
@@ -58,6 +60,7 @@ interface Summary {
   engine?: string;
   pagesCrawled?: number;
   requestsMade?: number;
+  coverage?: CoverageData;
 }
 
 export function ScanView({ scanId }: { scanId: string }) {
@@ -112,6 +115,7 @@ export function ScanView({ scanId }: { scanId: string }) {
           engine: (e.meta?.engine as string) ?? undefined,
           pagesCrawled: e.meta?.pagesCrawled as number | undefined,
           requestsMade: e.meta?.requestsMade as number | undefined,
+          coverage: (e.meta?.coverage as CoverageData | undefined) ?? undefined,
         });
         es.close();
         // DB mode: findings live in Postgres — refetch. Stateless: harmless.
@@ -203,7 +207,7 @@ export function ScanView({ scanId }: { scanId: string }) {
 
           {/* Report */}
           <section>
-            <Report scan={effective} counts={counts} running={running} />
+            <Report scan={effective} counts={counts} running={running} coverage={summary?.coverage ?? null} />
           </section>
         </div>
       </div>

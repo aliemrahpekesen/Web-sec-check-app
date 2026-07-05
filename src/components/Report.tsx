@@ -10,13 +10,23 @@ export interface FindingRow {
   checkId: string;
   title: string;
   severity: Severity;
+  category?: string | null;
   cwe: string | null;
   owasp: string | null;
+  references?: string[] | null;
   location: string;
   description: string;
   evidence: string | null;
   remediation: string;
   confidence: string;
+}
+
+export interface CoverageData {
+  total: number;
+  passed: number;
+  failed: number;
+  notApplicable: number;
+  byCategory: Record<string, { run: number; passed: number; failed: number }>;
 }
 
 export interface FullScan {
@@ -44,14 +54,41 @@ const GRADE_COLOR: Record<string, string> = {
   F: "text-sev-critical",
 };
 
+const CAT_LABEL: Record<string, string> = {
+  headers: "Güvenlik Başlıkları",
+  cookies: "Çerezler",
+  tls: "TLS / Sertifika",
+  crypto: "Kriptografi",
+  csp: "CSP",
+  cors: "CORS",
+  disclosure: "Bilgi/Dosya İfşası",
+  content: "İçerik & Sırlar",
+  injection: "Enjeksiyon",
+  fingerprint: "Teknoloji Parmak İzi",
+  "dns-email": "DNS & E-posta",
+  "http-config": "HTTP Yapılandırması",
+  "auth-session": "Kimlik / Oturum",
+  api: "API",
+  cache: "Önbellek",
+  "supply-chain": "Tedarik Zinciri",
+};
+
+const CONF_COLOR: Record<string, string> = {
+  confirmed: "text-matrix border-matrix/40",
+  firm: "text-sev-low border-sev-low/40",
+  tentative: "text-sev-medium border-sev-medium/40",
+};
+
 export function Report({
   scan,
   counts,
   running,
+  coverage,
 }: {
   scan: FullScan | null;
   counts: Record<string, number>;
   running: boolean;
+  coverage?: CoverageData | null;
 }) {
   if (!scan) {
     return (
@@ -76,7 +113,9 @@ export function Report({
       generatedAt: new Date().toISOString(),
     };
     const content =
-      kind === "json" ? buildJsonReport(meta, scan!.findings) : buildMarkdownReport(meta, scan!.findings);
+      kind === "json"
+        ? buildJsonReport(meta, scan!.findings, coverage ?? undefined)
+        : buildMarkdownReport(meta, scan!.findings, coverage ?? undefined);
     const blob = new Blob([content], { type: kind === "json" ? "application/json" : "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -110,17 +149,40 @@ export function Report({
 
         <div className="mt-4 grid grid-cols-5 gap-2">
           {ORDER.map((sev) => (
-            <div
-              key={sev}
-              className="rounded-lg border border-matrix/10 bg-black/30 py-2 text-center"
-            >
+            <div key={sev} className="rounded-lg border border-matrix/10 bg-black/30 py-2 text-center">
               <div className="text-lg font-bold text-matrix">{counts[sev] ?? 0}</div>
-              <div className="font-mono text-[9px] uppercase tracking-wider text-matrix-dim">
-                {sev}
-              </div>
+              <div className="font-mono text-[9px] uppercase tracking-wider text-matrix-dim">{sev}</div>
             </div>
           ))}
         </div>
+
+        {coverage && (
+          <div className="mt-4 rounded-lg border border-matrix/15 bg-black/20 p-3">
+            <div className="mb-2 flex items-center justify-between font-mono text-[11px] text-matrix-dim">
+              <span>DENETİM KAPSAMI</span>
+              <span>
+                <span className="text-matrix">{coverage.total}</span> kontrol koştu ·{" "}
+                <span className="text-matrix">{coverage.passed}</span> geçti ·{" "}
+                <span className="text-sev-high">{coverage.failed}</span> bulgu
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(coverage.byCategory)
+                .sort((a, b) => b[1].failed - a[1].failed || b[1].run - a[1].run)
+                .map(([cat, c]) => (
+                  <span
+                    key={cat}
+                    title={`${c.run} kontrol, ${c.passed} geçti, ${c.failed} bulgu`}
+                    className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                      c.failed > 0 ? "border-sev-high/40 text-sev-high" : "border-matrix/20 text-matrix-dim"
+                    }`}
+                  >
+                    {CAT_LABEL[cat] ?? cat} {c.failed}/{c.run}
+                  </span>
+                ))}
+            </div>
+          </div>
+        )}
 
         {!running && (
           <div className="mt-4 flex gap-2">
@@ -150,7 +212,7 @@ export function Report({
       <div className="flex flex-col gap-2">
         {total === 0 && !running && (
           <div className="glass rounded-xl p-6 text-center font-mono text-sm text-matrix">
-            ✓ Bu profil için bulgu yok. Tebrikler.
+            ✓ Bu profil için bulgu yok. {coverage ? `${coverage.total} kontrolün tamamı geçti.` : "Tebrikler."}
           </div>
         )}
         {total === 0 && running && (
@@ -170,10 +232,7 @@ function FindingCard({ f }: { f: FindingRow }) {
   const [open, setOpen] = useState(f.severity === "CRITICAL" || f.severity === "HIGH");
   return (
     <div className="glass animate-fade-in rounded-xl">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-      >
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left">
         <span className="flex min-w-0 items-center gap-3">
           <SeverityBadge severity={f.severity} />
           <span className="truncate font-medium text-matrix/90">{f.title}</span>
@@ -183,17 +242,14 @@ function FindingCard({ f }: { f: FindingRow }) {
       {open && (
         <div className="space-y-3 border-t border-matrix/10 px-4 py-3 text-sm">
           <div className="flex flex-wrap gap-2 font-mono text-[11px]">
-            {f.cwe && (
-              <span className="rounded border border-matrix/20 px-2 py-0.5 text-matrix-dim">
-                {f.cwe}
+            {f.category && (
+              <span className="rounded border border-matrix/30 bg-matrix/5 px-2 py-0.5 text-matrix">
+                {CAT_LABEL[f.category] ?? f.category}
               </span>
             )}
-            {f.owasp && (
-              <span className="rounded border border-matrix/20 px-2 py-0.5 text-matrix-dim">
-                {f.owasp}
-              </span>
-            )}
-            <span className="rounded border border-matrix/20 px-2 py-0.5 text-matrix-dim">
+            {f.cwe && <span className="rounded border border-matrix/20 px-2 py-0.5 text-matrix-dim">{f.cwe}</span>}
+            {f.owasp && <span className="rounded border border-matrix/20 px-2 py-0.5 text-matrix-dim">{f.owasp}</span>}
+            <span className={`rounded border px-2 py-0.5 ${CONF_COLOR[f.confidence] ?? "border-matrix/20 text-matrix-dim"}`}>
               güven: {f.confidence}
             </span>
           </div>
@@ -211,20 +267,31 @@ function FindingCard({ f }: { f: FindingRow }) {
           {f.evidence && (
             <div>
               <div className="font-mono text-[10px] uppercase tracking-widest text-matrix-dim">Kanıt</div>
-              <pre className="overflow-x-auto rounded bg-black/50 p-3 font-mono text-xs text-sev-medium">
-                {f.evidence}
-              </pre>
+              <pre className="overflow-x-auto rounded bg-black/50 p-3 font-mono text-xs text-sev-medium">{f.evidence}</pre>
             </div>
           )}
 
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-widest text-matrix">
-              ⟶ Nasıl düzeltilir
-            </div>
+            <div className="font-mono text-[10px] uppercase tracking-widest text-matrix">⟶ Nasıl düzeltilir</div>
             <pre className="overflow-x-auto whitespace-pre-wrap rounded border border-matrix/20 bg-matrix-dark/40 p-3 font-mono text-xs text-matrix/90">
               {f.remediation}
             </pre>
           </div>
+
+          {f.references && f.references.length > 0 && (
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-widest text-matrix-dim">Referanslar</div>
+              <ul className="mt-1 space-y-0.5">
+                {f.references.map((r) => (
+                  <li key={r}>
+                    <a href={r} target="_blank" rel="noopener noreferrer" className="break-all font-mono text-xs text-sev-low underline hover:text-matrix">
+                      {r}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>

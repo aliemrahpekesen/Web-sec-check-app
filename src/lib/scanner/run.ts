@@ -64,6 +64,12 @@ export async function runScan(job: ScanJobData): Promise<void> {
       riskScore,
       grade,
       message: `Rapor hazır — risk skoru ${riskScore}/100, not ${grade}.`,
+      meta: {
+        engine,
+        pagesCrawled: result.pagesCrawled,
+        requestsMade: result.requestsMade,
+        coverage: result.coverage,
+      },
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -114,7 +120,7 @@ export async function runScanStateless(
       riskScore,
       grade,
       message: `Rapor hazır — risk skoru ${riskScore}/100, not ${grade}.`,
-      meta: { engine, pagesCrawled: result.pagesCrawled, requestsMade: result.requestsMade },
+      meta: { engine, pagesCrawled: result.pagesCrawled, requestsMade: result.requestsMade, coverage: result.coverage },
     });
   } catch (e) {
     await emit({
