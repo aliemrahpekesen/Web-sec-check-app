@@ -194,6 +194,39 @@ describe("accuracy — detects real problems on a vulnerable target", () => {
     expect(ids.has(id)).toBe(true);
   });
 
+  it("downgrades a signatureless HTML disclosure hit to LOW/tentative (app-page, not a leak)", () => {
+    const ev = evidence({
+      paths: {
+        "/manager/html": { path: "/manager/html", status: 200, contentType: "text/html; charset=utf-8", length: 800, snippet: "<html>app</html>", exists: true },
+      },
+    });
+    const f = runChecks(ALL_CHECKS, ev).findings.find((x) => x.location.includes("/manager/html"));
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe("LOW");
+    expect(f!.confidence).toBe("tentative");
+  });
+
+  it("keeps a non-HTML file leak confirmed/high", () => {
+    const ev = evidence({
+      paths: {
+        "/backup.zip": { path: "/backup.zip", status: 200, contentType: "application/zip", length: 90000, snippet: "PK..", exists: true },
+      },
+    });
+    const f = runChecks(ALL_CHECKS, ev).findings.find((x) => x.location.includes("/backup.zip"));
+    expect(f).toBeDefined();
+    expect(f!.confidence).toBe("confirmed");
+    expect(f!.severity).toBe("HIGH");
+  });
+
+  it("does not report SPF/DMARC missing when the TXT lookup failed", () => {
+    const ev = evidence({
+      dns: { resolved: true, a: ["1.1.1.1"], aaaa: [], mx: ["mx"], ns: ["ns1"], txt: [], caa: [], txtResolved: false },
+    });
+    const ids = runChecks(ALL_CHECKS, ev).findings.map((f) => f.checkId);
+    expect(ids).not.toContain("dns-spf-missing");
+    expect(ids).not.toContain("dns-dmarc-missing");
+  });
+
   it("flags the exposed .env file", () => {
     const disclosureHit = [...ids].some((id) => id.startsWith("disclosure-") && runChecks(ALL_CHECKS, vuln).findings.some((f) => f.checkId === id && f.location.includes("/.env")));
     expect(disclosureHit).toBe(true);

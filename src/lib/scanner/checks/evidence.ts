@@ -90,8 +90,19 @@ async function collectDns(host: string): Promise<DnsEvidence> {
   out.aaaa = await safe(dns.resolve6(host), []);
   out.mx = (await safe(dns.resolveMx(host), [])).map((m) => m.exchange);
   out.ns = await safe(dns.resolveNs(host), []);
-  const txts = await safe(dns.resolveTxt(host), []);
-  out.txt = txts.map((chunks) => chunks.join(""));
+  // TXT resolution drives SPF/DMARC — retry transient failures, and record
+  // whether it ultimately succeeded so "missing" checks don't fire on a
+  // timeout (can't-check ≠ absent).
+  let txts: string[][] | null = null;
+  for (let attempt = 0; attempt < 3 && txts === null; attempt++) {
+    try {
+      txts = await dns.resolveTxt(host);
+    } catch {
+      txts = null;
+    }
+  }
+  out.txtResolved = txts !== null;
+  out.txt = (txts ?? []).map((chunks) => chunks.join(""));
   out.caa = (await safe(dns.resolveCaa(host), [])).map((c) => JSON.stringify(c));
   out.spf = out.txt.find((t) => /^v=spf1/i.test(t));
   const dmarcTxt = await safe(dns.resolveTxt(`_dmarc.${host}`), []);
@@ -105,11 +116,14 @@ async function collectDns(host: string): Promise<DnsEvidence> {
 
 // ---- Sensitive-path probing (bounded by profile + budget) -------------------
 
+function isHtmlResp(res: HttpResult): boolean {
+  return /text\/html/i.test(res.headers["content-type"] ?? "") || /<!doctype html>|<html[\s>]/i.test(res.body);
+}
+
 function looksReal(path: string, res: HttpResult): boolean {
   if (res.status !== 200 || !res.body) return false;
   const body = res.body;
-  // Guard against SPA/catch-all 200s that return index.html for everything.
-  const isHtml = /<!doctype html>|<html[\s>]/i.test(body);
+  const isHtml = isHtmlResp(res);
   if (path.endsWith(".json")) return /^[\s]*[[{]/.test(body);
   if (path === "/.env" || /\.env/.test(path)) return /^[A-Z0-9_]+\s*=/m.test(body) && !isHtml;
   if (path.includes(".git")) return /(ref:|\[core\]|^P )/m.test(body) && !isHtml;
@@ -118,14 +132,47 @@ function looksReal(path: string, res: HttpResult): boolean {
   return true;
 }
 
+interface Baseline {
+  status: number;
+  len: number;
+  html: boolean;
+}
+
+// Probe a couple of definitely-nonexistent paths to learn how the site answers
+// "not found". Sites that return a 200 app-shell for everything (SPAs, GitHub,
+// many frameworks) would otherwise trigger false disclosure findings.
+async function softNotFoundBaseline(origin: string, budget: RequestBudget): Promise<{ baselines: Baseline[]; catchAll: boolean }> {
+  const baselines: Baseline[] = [];
+  for (const rnd of ["/sentinel-nx-a8f3e1q9z2", "/sentinel-nx-4d7b0c.html"]) {
+    if (budget.expired()) break;
+    const r = await httpGet(`${origin}${rnd}`, { budget, redirect: "manual" });
+    if (!r.error) baselines.push({ status: r.status, len: r.body.length, html: isHtmlResp(r) });
+  }
+  const catchAll = baselines.some((b) => b.status === 200);
+  return { baselines, catchAll };
+}
+
+function titleSegs(title: string): string[] {
+  return title
+    .split(/[·|—–:]|\s[-|]\s/)
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length >= 3);
+}
+function pageTitle(body: string): string {
+  return /<title[^>]*>([^<]*)<\/title>/i.exec(body)?.[1]?.trim() ?? "";
+}
+
 async function probePaths(
   origin: string,
   profile: ScanProfile,
   budget: RequestBudget,
   emit: Emit,
+  rootTitle: string,
 ): Promise<Record<string, ProbeEvidence>> {
   const out: Record<string, ProbeEvidence> = {};
   if (profile === "PASSIVE") return out;
+  const { baselines, catchAll } = await softNotFoundBaseline(origin, budget);
+  const rootSegs = new Set(titleSegs(rootTitle)); // the site's title "brand"
   const maxTier = profile === "DEEP" ? 2 : 1;
   const list = SENSITIVE_PATHS.filter((p) => p.tier <= maxTier);
   let probed = 0;
@@ -133,7 +180,21 @@ async function probePaths(
     if (budget.expired()) break;
     const res = await httpGet(`${origin}${sig.path}`, { budget, redirect: "manual" });
     if (res.error) continue;
-    const exists = looksReal(sig.path, res) && (!sig.sig || sig.sig.test(res.body));
+    let exists = looksReal(sig.path, res) && (!sig.sig || sig.sig.test(res.body));
+    // Soft-404 suppression: drop matches indistinguishable from the site's
+    // "not found" response, and — on catch-all-200 sites — any signatureless
+    // HTML hit (a real leaked file is almost never the app's HTML shell).
+    if (exists) {
+      const twin = baselines.find((b) => b.status === res.status && Math.abs(res.body.length - b.len) <= Math.max(64, b.len * 0.15));
+      if (twin) exists = false;
+      else if (catchAll && !sig.sig && isHtmlResp(res)) exists = false;
+      else if (isHtmlResp(res) && rootSegs.size) {
+        // Shares the homepage's title "brand" → it's the app's own page (e.g. a
+        // code-host serving /phpmyadmin as an org page), not a leaked artefact.
+        const shares = titleSegs(pageTitle(res.body)).some((s) => rootSegs.has(s));
+        if (shares) exists = false;
+      }
+    }
     out[sig.path] = {
       path: sig.path,
       status: res.status,
@@ -387,7 +448,7 @@ export async function collectEvidence(
 
   // Sensitive paths.
   await emit({ type: "log", level: "step", message: "Hassas dosya/dizinler aranıyor…" });
-  const paths = await probePaths(origin, profile, budget, emit);
+  const paths = await probePaths(origin, profile, budget, emit, root.title);
 
   const ev: Evidence = {
     target,

@@ -33,10 +33,19 @@ export const DISCLOSURE_CHECKS: Check[] = SENSITIVE_PATHS.map((sig, i): Check =>
       const probe = ev.paths[sig.path];
       if (probe === undefined) return null; // not probed at this profile/budget
       if (probe.exists) {
+        // A 200 HTML response for a path with no content signature can't be
+        // confirmed as a real leaked file — it may be the app's own page (e.g.
+        // a framework route or a username that maps to a profile). Downgrade to
+        // a low-confidence hint instead of a false-alarming high finding.
+        const unconfirmed = !sig.sig && /text\/html/i.test(probe.contentType);
         return {
           status: "fail",
           location: `${ev.origin}${sig.path}`,
-          confidence: "confirmed",
+          confidence: unconfirmed ? "tentative" : "confirmed",
+          severity: unconfirmed && sig.severity !== "INFO" ? "LOW" : undefined,
+          detail: unconfirmed
+            ? "İçerik imzası olmadan HTML yanıt döndü; bu gerçek bir sızıntı yerine bir uygulama sayfası da olabilir. Elle doğrulayın."
+            : undefined,
           evidence: `HTTP ${probe.status} · ${probe.contentType || "?"} · ${probe.length} bayt\nÖrnek: ${probe.snippet}`,
         };
       }

@@ -110,6 +110,7 @@ export interface DnsEvidence {
   dmarcPolicy?: string;
   dkimHint?: boolean;
   mtaSts?: boolean;
+  txtResolved?: boolean; // false = the TXT lookup failed → "missing" is unknown
   error?: string;
 }
 

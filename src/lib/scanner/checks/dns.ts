@@ -112,6 +112,7 @@ export const DNS_EMAIL_CHECKS: Check[] = [
     evaluate(ev) {
       if (!ev.dns.resolved) return null;
       if (ev.dns.spf) return { status: "pass" };
+      if (ev.dns.txtResolved === false) return null; // TXT lookup failed → can't conclude "missing"
       if (ev.dns.mx.length > 0) {
         return {
           status: "fail",
@@ -351,6 +352,7 @@ export const DNS_EMAIL_CHECKS: Check[] = [
     evaluate(ev) {
       if (!ev.dns.resolved) return null;
       if (ev.dns.dmarc) return { status: "pass" };
+      if (ev.dns.txtResolved === false) return null; // DNS TXT flaky → can't conclude "missing"
       // DMARC yalnızca posta gönderen/alan bir alan için anlamlı; MX veya SPF yoksa da öneririz.
       const relevant = ev.dns.mx.length > 0 || Boolean(ev.dns.spf);
       return {
