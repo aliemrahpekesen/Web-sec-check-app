@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { SeverityBadge } from "./SeverityBadge";
 import type { Severity } from "@/lib/types";
-import { buildJsonReport, buildMarkdownReport, type ReportMeta } from "@/lib/report";
+import { buildJsonReport, buildMarkdownReport, buildHtmlReport, type ReportMeta } from "@/lib/report";
 
 export interface FindingRow {
   id: string;
@@ -90,6 +90,10 @@ export function Report({
   running: boolean;
   coverage?: CoverageData | null;
 }) {
+  const [sevFilter, setSevFilter] = useState<Set<Severity>>(new Set());
+  const [catFilter, setCatFilter] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
   if (!scan) {
     return (
       <div className="glass flex h-[70vh] items-center justify-center rounded-xl">
@@ -98,9 +102,25 @@ export function Report({
     );
   }
 
+  const q = query.trim().toLowerCase();
+  const filtered = scan.findings.filter((f) => {
+    if (sevFilter.size && !sevFilter.has(f.severity)) return false;
+    if (catFilter && f.category !== catFilter) return false;
+    if (q && !`${f.title} ${f.location} ${f.checkId} ${f.cwe ?? ""} ${f.category ?? ""}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const categories = [...new Set(scan.findings.map((f) => f.category).filter(Boolean))] as string[];
+  const toggleSev = (s: Severity) =>
+    setSevFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(s)) next.delete(s);
+      else next.add(s);
+      return next;
+    });
+
   const total = scan.findings.length;
 
-  function download(kind: "json" | "md") {
+  function download(kind: "json" | "md" | "html") {
     const meta: ReportMeta = {
       target: scan!.target,
       host: scan!.host,
@@ -112,15 +132,19 @@ export function Report({
       requestsMade: scan!.requestsMade,
       generatedAt: new Date().toISOString(),
     };
+    const cov = coverage ?? undefined;
     const content =
       kind === "json"
-        ? buildJsonReport(meta, scan!.findings, coverage ?? undefined)
-        : buildMarkdownReport(meta, scan!.findings, coverage ?? undefined);
-    const blob = new Blob([content], { type: kind === "json" ? "application/json" : "text/markdown" });
+        ? buildJsonReport(meta, scan!.findings, cov)
+        : kind === "html"
+          ? buildHtmlReport(meta, scan!.findings, cov)
+          : buildMarkdownReport(meta, scan!.findings, cov);
+    const type = kind === "json" ? "application/json" : kind === "html" ? "text/html" : "text/markdown";
+    const blob = new Blob([content], { type });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `sentinelscan-${scan!.host}-${Date.now()}.${kind === "json" ? "json" : "md"}`;
+    a.download = `sentinelscan-${scan!.host}-${Date.now()}.${kind}`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -193,6 +217,12 @@ export function Report({
               ⬇ Markdown rapor
             </button>
             <button
+              onClick={() => download("html")}
+              className="rounded-lg border border-matrix/30 bg-black/30 px-3 py-1.5 font-mono text-xs text-matrix transition hover:border-matrix/60 hover:bg-matrix/10"
+            >
+              ⬇ HTML rapor
+            </button>
+            <button
               onClick={() => download("json")}
               className="rounded-lg border border-matrix/30 bg-black/30 px-3 py-1.5 font-mono text-xs text-matrix transition hover:border-matrix/60 hover:bg-matrix/10"
             >
@@ -208,6 +238,57 @@ export function Report({
         )}
       </div>
 
+      {/* Filter bar */}
+      {total > 0 && (
+        <div className="glass flex flex-wrap items-center gap-2 rounded-xl p-3">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="bulgularda ara…"
+            className="min-w-[140px] flex-1 rounded-lg border border-matrix/20 bg-black/40 px-3 py-1.5 font-mono text-xs text-matrix outline-none placeholder:text-matrix-dim/60 focus:border-matrix"
+          />
+          <div className="flex gap-1">
+            {ORDER.filter((s) => (counts[s] ?? 0) > 0).map((s) => (
+              <button
+                key={s}
+                onClick={() => toggleSev(s)}
+                className={`rounded border px-2 py-1 font-mono text-[10px] transition ${
+                  sevFilter.has(s) ? "border-matrix bg-matrix/20 text-matrix" : "border-matrix/20 text-matrix-dim hover:border-matrix/50"
+                }`}
+              >
+                {s} {counts[s] ?? 0}
+              </button>
+            ))}
+          </div>
+          {categories.length > 1 && (
+            <select
+              value={catFilter ?? ""}
+              onChange={(e) => setCatFilter(e.target.value || null)}
+              className="rounded-lg border border-matrix/20 bg-black/40 px-2 py-1.5 font-mono text-xs text-matrix outline-none focus:border-matrix"
+            >
+              <option value="">tüm kategoriler</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>
+                  {CAT_LABEL[c] ?? c}
+                </option>
+              ))}
+            </select>
+          )}
+          {(sevFilter.size > 0 || catFilter || query) && (
+            <button
+              onClick={() => {
+                setSevFilter(new Set());
+                setCatFilter(null);
+                setQuery("");
+              }}
+              className="font-mono text-[11px] text-matrix-dim underline hover:text-matrix"
+            >
+              temizle ({filtered.length}/{total})
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Findings */}
       <div className="flex flex-col gap-2">
         {total === 0 && !running && (
@@ -220,7 +301,12 @@ export function Report({
             bulgular akarken burada belirecek…
           </div>
         )}
-        {scan.findings.map((f) => (
+        {total > 0 && filtered.length === 0 && (
+          <div className="glass rounded-xl p-6 text-center font-mono text-sm text-matrix-dim">
+            Filtreyle eşleşen bulgu yok.
+          </div>
+        )}
+        {filtered.map((f) => (
           <FindingCard key={f.id} f={f} />
         ))}
       </div>

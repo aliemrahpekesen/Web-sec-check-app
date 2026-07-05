@@ -96,23 +96,27 @@ ve **yönlendirme zincirinin her adımı** reddedilir. Stateless mod dahil tüm 
 Yerel geliştirmede `SENTINEL_SKIP_VERIFICATION=true`, `SENTINEL_SCAN_ALLOWLIST=host1,host2` ya da
 iç hedefler için `SENTINEL_ALLOW_PRIVATE_TARGETS=true` kullanın — yalnızca yetkili olduğunuz hedefler için.
 
-## Kontrol Kataloğu (500+ kontrol)
+## Kontrol Kataloğu (770+ kontrol)
 
-Tarama motoru artık **katalog tabanlıdır** (`src/lib/scanner/checks/`): kanıt bir kez toplanır
-(`evidence.ts` — kök yanıt, crawl, derin TLS, DNS/e-posta, HTTP metodları, CORS probu, sınırlı
-hassas-yol ve aktif enjeksiyon probları), sonra **500'den fazla** bağımsız kontrol bu anlık görüntü
-üzerinde çalışır. Her kontrol:
+Tarama motoru **katalog tabanlıdır** (`src/lib/scanner/checks/`): kanıt bir kez toplanır
+(`evidence.ts` — kök yanıt, crawl, **derin TLS + protokol/şifre matris enumerasyonu**, DNS/e-posta,
+**CNAME (subdomain takeover)**, HTTP metodları, CORS probu, **GraphQL introspection**, **robots.txt
+madenciliği**, 470+ hassas-yol imzası ve 11 doğrulanmış aktif enjeksiyon probu), sonra **770'ten
+fazla** bağımsız kontrol bu anlık görüntü üzerinde çalışır. Her kontrol:
 
 - Yalnızca **somut kanıt** varsa bulgu üretir (yanlış-pozitif önleme testlerle güvence altında).
 - **fail / pass / n-a** durumu döndürür; böylece rapor "kaç kontrol koştu, kaç geçti, kaç bulgu"
   **kapsamını** kategori kategori gösterir — kullanıcı raporun doğruluğuna güvenebilir.
 - **Kanıt + güven seviyesi (confirmed/firm/tentative) + CWE/OWASP + referans bağlantıları** taşır.
 
-Kategoriler: güvenlik başlıkları, çerezler, TLS, kriptografi, CSP kalitesi, CORS, bilgi/dosya
-ifşası (300+ yol imzası), içerik & sır sızıntısı, enjeksiyon (XSS/SQLi/SSTI/LFI/CRLF/open-redirect/
-host-header — doğrulanmış), teknoloji parmak izi + sürüm CVE'leri, DNS & e-posta (SPF/DKIM/DMARC/
-CAA/MTA-STS), HTTP yapılandırması, kimlik/oturum, API yüzeyi, önbellek. AI motoru (Opus 4.8) bu
-kataloğu **baz çizgi** olarak koşturur, üzerine akıl yürütür — yani AI daima katalogun üst kümesidir.
+Kategoriler: güvenlik başlıkları (70+), çerezler, TLS + **protokol/şifre matrisi**, kriptografi,
+CSP kalitesi, CORS, bilgi/dosya ifşası (470+ yol imzası + robots.txt madenciliği), içerik & sır
+sızıntısı, enjeksiyon (XSS/SQLi/NoSQLi/komut/LDAP/SSTI/LFI/CRLF/open-redirect/host-header/**SSRF-metadata**
+— doğrulanmış), teknoloji parmak izi + sürüm CVE'leri, **subdomain takeover**, DNS & e-posta
+(SPF/DKIM/DMARC/CAA/MTA-STS/TLS-RPT/BIMI), HTTP yapılandırması, kimlik/oturum, API yüzeyi +
+**GraphQL introspection**, önbellek. Rapor **Markdown / JSON / HTML** olarak dışa aktarılır; kritiklik,
+kategori ve metin filtreleriyle taranabilir. AI motoru (Opus 4.8) bu kataloğu **baz çizgi** olarak
+koşturur, üzerine akıl yürütür — yani AI daima katalogun üst kümesidir.
 
 ## Denetlenen açıklar (özet)
 

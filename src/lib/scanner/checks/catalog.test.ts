@@ -66,6 +66,15 @@ function evidence(overrides: Partial<Evidence> = {}): Evidence {
       sigAlg: "sha256WithRSAEncryption",
       selfSigned: false,
     },
+    tlsMatrix: {
+      tested: true,
+      protocols: { "TLSv1": false, "TLSv1.1": false, "TLSv1.2": true, "TLSv1.3": true },
+      weakCiphersOffered: [],
+      forwardSecrecy: true,
+    },
+    cnames: [],
+    graphql: null,
+    robotsDisallow: [],
     dns: {
       resolved: true,
       a: ["93.184.216.34"],
@@ -154,6 +163,9 @@ describe("accuracy — detects real problems on a vulnerable target", () => {
       validTo: "Jan 1 2020",
     },
     dns: { resolved: true, a: ["1.1.1.1"], aaaa: [], mx: ["mx"], ns: ["ns1"], txt: [], caa: [], spf: undefined, dmarc: undefined },
+    tlsMatrix: { tested: true, protocols: { "TLSv1": true, "TLSv1.1": true, "TLSv1.2": true, "TLSv1.3": false }, weakCiphersOffered: ["RC4-SHA"], forwardSecrecy: false },
+    graphql: { endpoint: "https://x/graphql", reachable: true, introspectionEnabled: true },
+    robotsDisallow: ["/admin"],
     httpRoot: page({ url: "http://x/", status: 200 }),
     redirectsToHttps: false,
     cors: { probeOrigin: "https://evil.example.com", acao: "https://evil.example.com", acac: "true", reflectsOrigin: true, wildcard: false, allowsNullOrigin: false, vary: "" },
@@ -174,6 +186,10 @@ describe("accuracy — detects real problems on a vulnerable target", () => {
     "cors-reflect-credentials",
     "secret-aws-akid",
     "content-sri-missing",
+    "tlsm-tls10-enabled",
+    "tlsm-weak-cipher-offered",
+    "api-graphql-introspection",
+    "disclosure-robots-accessible",
   ])("flags %s", (id) => {
     expect(ids.has(id)).toBe(true);
   });

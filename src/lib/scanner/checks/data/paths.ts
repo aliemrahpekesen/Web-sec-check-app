@@ -5,6 +5,7 @@
 // findings accurate.
 import type { Severity } from "../types";
 import { SENSITIVE_PATHS_EXTENDED } from "./paths-extended";
+import { SENSITIVE_PATHS_EXTENDED_2 } from "./paths-extended-2";
 
 export interface PathSig {
   path: string;
@@ -195,7 +196,10 @@ const BASE_PATHS: PathSig[] = [
 
 // De-duplicate by path (base list wins on any accidental collision).
 const seenPaths = new Set(BASE_PATHS.map((p) => p.path));
-export const SENSITIVE_PATHS: PathSig[] = [
-  ...BASE_PATHS,
-  ...SENSITIVE_PATHS_EXTENDED.filter((p) => !seenPaths.has(p.path)),
-];
+export const SENSITIVE_PATHS: PathSig[] = [...BASE_PATHS];
+for (const extra of [...SENSITIVE_PATHS_EXTENDED, ...SENSITIVE_PATHS_EXTENDED_2]) {
+  if (!seenPaths.has(extra.path)) {
+    seenPaths.add(extra.path);
+    SENSITIVE_PATHS.push(extra);
+  }
+}

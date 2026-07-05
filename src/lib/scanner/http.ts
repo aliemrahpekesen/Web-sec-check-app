@@ -55,9 +55,10 @@ export async function httpGet(
     method?: string;
     headers?: Record<string, string>;
     timeout?: number;
+    body?: string;
   } = {},
 ): Promise<HttpResult> {
-  const { budget, redirect = "follow", method = "GET", headers = {}, timeout = DEFAULT_TIMEOUT } = opts;
+  const { budget, redirect = "follow", method = "GET", headers = {}, timeout = DEFAULT_TIMEOUT, body: reqBody } = opts;
 
   if (budget) {
     if (budget.expired()) return errorResult(url, "time budget exhausted");
@@ -73,6 +74,7 @@ export async function httpGet(
       redirect,
       headers: { "User-Agent": UA, Accept: "*/*", ...headers },
       timeout: effectiveTimeout,
+      body: reqBody,
     });
 
     const headerObj: Record<string, string> = {};

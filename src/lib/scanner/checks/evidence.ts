@@ -8,7 +8,7 @@ import { assertPublicHost } from "../../ssrf";
 import type { Emit, ScanProfile } from "./types";
 import { SENSITIVE_PATHS } from "./data/paths";
 import { runActiveProbes } from "./active";
-import type { Evidence, PageEvidence, TlsEvidence, DnsEvidence, ProbeEvidence } from "./types";
+import type { Evidence, PageEvidence, TlsEvidence, TlsMatrix, DnsEvidence, ProbeEvidence } from "./types";
 
 function toPage(res: HttpResult): PageEvidence {
   const title = /<title[^>]*>([^<]*)<\/title>/i.exec(res.body)?.[1]?.trim().slice(0, 200) ?? "";
@@ -161,6 +161,109 @@ async function collectMethods(target: string, budget: RequestBudget): Promise<{ 
   return { methods, allow };
 }
 
+// ---- TLS protocol/cipher enumeration (DEEP) ---------------------------------
+
+function tlsConnect(host: string, opts: tls.ConnectionOptions): Promise<{ ok: boolean; cipher?: string }> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r: { ok: boolean; cipher?: string }) => {
+      if (done) return;
+      done = true;
+      resolve(r);
+    };
+    let socket: tls.TLSSocket;
+    try {
+      socket = tls.connect({ host, port: 443, servername: host, rejectUnauthorized: false, ...opts }, () => {
+        const c = socket.getCipher?.();
+        socket.destroy();
+        finish({ ok: true, cipher: c?.name });
+      });
+    } catch {
+      finish({ ok: false });
+      return;
+    }
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+      finish({ ok: false });
+    });
+    socket.on("error", () => finish({ ok: false }));
+  });
+}
+
+async function enumerateTls(host: string, normalCipher: string | undefined): Promise<TlsMatrix> {
+  const versions: Array<"TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3"> = ["TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3"];
+  const protocols = { "TLSv1": false, "TLSv1.1": false, "TLSv1.2": false, "TLSv1.3": false } as TlsMatrix["protocols"];
+  for (const v of versions) {
+    // Only a SUCCESSFUL handshake marks a version as enabled — a failure is
+    // ambiguous (client may have it disabled), so we never false-positive.
+    const r = await tlsConnect(host, {
+      minVersion: v,
+      maxVersion: v,
+      ciphers: v === "TLSv1.3" ? undefined : "DEFAULT@SECLEVEL=0",
+    }).catch(() => ({ ok: false }));
+    protocols[v] = r.ok;
+  }
+  // Weak-cipher offering: try to negotiate a legacy cipher on TLS ≤1.2.
+  let weakCiphersOffered: string[] = [];
+  const weak = await tlsConnect(host, {
+    minVersion: "TLSv1",
+    maxVersion: "TLSv1.2",
+    ciphers: "RC4-SHA:RC4-MD5:DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:EDH-RSA-DES-CBC3-SHA@SECLEVEL=0",
+  }).catch(() => ({ ok: false, cipher: undefined as string | undefined }));
+  if (weak.ok && weak.cipher && /RC4|3DES|DES-CBC3|NULL|EXPORT/i.test(weak.cipher)) {
+    weakCiphersOffered = [weak.cipher];
+  }
+  const forwardSecrecy = /ECDHE|DHE/i.test(normalCipher ?? "");
+  return { tested: true, protocols, weakCiphersOffered, forwardSecrecy };
+}
+
+async function resolveCnames(host: string): Promise<string[]> {
+  try {
+    return await dns.resolveCname(host);
+  } catch {
+    return [];
+  }
+}
+
+// GraphQL introspection probe (POST a minimal introspection query).
+async function probeGraphql(origin: string, budget: RequestBudget): Promise<Evidence["graphql"]> {
+  const endpoints = ["/graphql", "/api/graphql", "/v1/graphql", "/query"];
+  const query = JSON.stringify({ query: "{__schema{queryType{name}}}" });
+  for (const ep of endpoints) {
+    if (budget.expired()) break;
+    const res = await httpGet(`${origin}${ep}`, {
+      budget,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: query,
+    });
+    if (res.error) continue;
+    const looksGraphql = /"data"|"errors"|__schema|queryType|GraphQL/i.test(res.body);
+    if (res.status < 500 && looksGraphql) {
+      const introspectionEnabled = /"__schema"|"queryType"/.test(res.body) && !/introspection is disabled|GraphQL introspection is not allowed/i.test(res.body);
+      return { endpoint: `${origin}${ep}`, reachable: true, introspectionEnabled };
+    }
+  }
+  return null;
+}
+
+// robots.txt mining: probe Disallow'd paths; return the ones publicly reachable.
+async function mineRobots(origin: string, budget: RequestBudget): Promise<string[]> {
+  const res = await httpGet(`${origin}/robots.txt`, { budget, redirect: "manual" });
+  if (res.error || res.status !== 200 || !/disallow/i.test(res.body)) return [];
+  const disallowed = [...res.body.matchAll(/^\s*Disallow:\s*(\S+)/gim)]
+    .map((m) => m[1])
+    .filter((p) => p && p !== "/" && !p.includes("*"))
+    .slice(0, 20);
+  const accessible: string[] = [];
+  for (const p of disallowed) {
+    if (budget.expired()) break;
+    const r = await httpGet(`${origin}${p}`, { budget, redirect: "manual" });
+    if (!r.error && r.status === 200 && r.body.length > 0) accessible.push(p);
+  }
+  return accessible;
+}
+
 // ---------------------------------------------------------------------------
 
 export async function collectEvidence(
@@ -261,6 +364,27 @@ export async function collectEvidence(
     }
   }
 
+  // CNAME chain (subdomain-takeover analysis).
+  const cnames = await resolveCnames(host);
+
+  // TLS protocol/cipher enumeration (DEEP only — several extra handshakes).
+  let tlsMatrix: TlsMatrix | null = null;
+  if (profile === "DEEP" && tlsEv.reachable && !tlsEv.error) {
+    await emit({ type: "log", level: "step", message: "TLS protokol/şifre matrisi çıkarılıyor…" });
+    tlsMatrix = await enumerateTls(host, tlsEv.cipherName);
+  }
+
+  // GraphQL introspection + robots.txt mining (active discovery).
+  let graphql: Evidence["graphql"] = null;
+  let robotsDisallow: string[] = [];
+  if (profile !== "PASSIVE") {
+    graphql = await probeGraphql(origin, budget);
+    robotsDisallow = await mineRobots(origin, budget);
+    if (robotsDisallow.length) {
+      await emit({ type: "log", level: "info", message: `robots.txt madenciliği: ${robotsDisallow.length} gizli ama erişilebilir yol.` });
+    }
+  }
+
   // Sensitive paths.
   await emit({ type: "log", level: "step", message: "Hassas dosya/dizinler aranıyor…" });
   const paths = await probePaths(origin, profile, budget, emit);
@@ -279,7 +403,11 @@ export async function collectEvidence(
     forms,
     apiEndpoints,
     tls: tlsEv,
+    tlsMatrix,
     dns: dnsEv,
+    cnames,
+    graphql,
+    robotsDisallow,
     methods,
     allowHeader: allow,
     cors,
