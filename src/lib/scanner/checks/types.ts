@@ -113,6 +113,20 @@ export interface DnsEvidence {
   error?: string;
 }
 
+export interface TlsMatrix {
+  tested: boolean;
+  // Which protocol versions the server actually completes a handshake with.
+  protocols: Record<"TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3", boolean>;
+  weakCiphersOffered: string[]; // negotiated when only weak ciphers were offered
+  forwardSecrecy: boolean; // an ECDHE/DHE suite negotiated on a modern handshake
+}
+
+export interface GraphqlEvidence {
+  endpoint: string;
+  reachable: boolean;
+  introspectionEnabled: boolean;
+}
+
 export interface CorsEvidence {
   probeOrigin: string; // the malicious Origin we sent
   acao: string; // Access-Control-Allow-Origin returned
@@ -148,7 +162,11 @@ export interface Evidence {
   apiEndpoints: string[];
 
   tls: TlsEvidence;
+  tlsMatrix: TlsMatrix | null; // protocol/cipher enumeration (DEEP)
   dns: DnsEvidence;
+  cnames: string[]; // CNAME chain for the host (subdomain-takeover analysis)
+  graphql: GraphqlEvidence | null; // GraphQL introspection probe result
+  robotsDisallow: string[]; // paths hidden by robots.txt Disallow (probed)
 
   methods: Record<string, number>; // HTTP method -> observed status
   allowHeader: string; // value of the Allow header on OPTIONS, if any

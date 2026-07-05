@@ -13,6 +13,9 @@ import { INJECTION_CHECKS } from "./active";
 import { FINGERPRINT_CHECKS } from "./fingerprint";
 import { DNS_EMAIL_CHECKS } from "./dns";
 import { API_CHECKS, HTTP_CONFIG_CHECKS } from "./apihttp";
+import { CRYPTO_ENUM_CHECKS } from "./cryptoenum";
+import { HEADERS_EXTRA_CHECKS } from "./headersextra";
+import { DISCOVERY_CHECKS } from "./discovery";
 
 const MODULES: Check[][] = [
   HEADER_CHECKS,
@@ -29,6 +32,9 @@ const MODULES: Check[][] = [
   DNS_EMAIL_CHECKS,
   API_CHECKS,
   HTTP_CONFIG_CHECKS,
+  CRYPTO_ENUM_CHECKS,
+  HEADERS_EXTRA_CHECKS,
+  DISCOVERY_CHECKS,
 ];
 
 function build(): Check[] {

@@ -188,6 +188,7 @@ export interface SafeFetchOptions {
   redirect?: "follow" | "manual";
   timeout?: number;
   signal?: AbortSignal;
+  body?: string;
 }
 
 function assertHttpUrl(u: URL): void {
@@ -203,7 +204,7 @@ function assertHttpUrl(u: URL): void {
 // working — those never dereference the Location, so a single validation is
 // sufficient.
 export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promise<Response> {
-  const { method = "GET", headers = {}, redirect = "follow", timeout = DEFAULT_TIMEOUT, signal } = opts;
+  const { method = "GET", headers = {}, redirect = "follow", timeout = DEFAULT_TIMEOUT, signal, body } = opts;
 
   let current = new URL(url);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -213,6 +214,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
     const res = await fetch(current.toString(), {
       method,
       headers,
+      body,
       redirect: "manual",
       signal: signal ?? AbortSignal.timeout(timeout),
     });

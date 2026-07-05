@@ -49,13 +49,20 @@ function candidates(ev: Evidence, limit: number): Candidate[] {
 
 const SQL_ERRORS =
   /(SQL syntax|mysql_fetch|ORA-\d{5}|PostgreSQL.*ERROR|SQLite\/JDBCDriver|Unclosed quotation mark|quoted string not properly terminated|SQLSTATE\[|Warning: mysqli|valid MySQL result|com\.mysql\.jdbc)/i;
+const NOSQL_ERRORS = /(MongoError|MongoDB|CastError|BSONError|E11000 duplicate|CouchDB|\$where|Unexpected token.*JSON|failed to parse.*ObjectId)/i;
+const LDAP_ERRORS = /(javax\.naming|com\.sun\.jndi\.ldap|LDAPException|Invalid DN syntax|LDAP: error code|supplied argument is not a valid ldap)/i;
+const CMD_OUTPUT = /uid=\d+\([a-z0-9_-]+\)\s+gid=\d+\(/i; // `id` command output
+const METADATA_LEAK = /(ami-id|instance-id|iam\/security-credentials|instance-action|placement\/availability-zone|"AccessKeyId")/i;
 
 export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
   const budget = ev.budget;
   const cap = ev.profile === "DEEP" ? 20 : 8;
   const cands = candidates(ev, cap);
 
-  const ids = ["xss-reflected", "open-redirect", "sqli-error", "ssti", "crlf-injection", "path-traversal", "host-header-injection"];
+  const ids = [
+    "xss-reflected", "open-redirect", "sqli-error", "ssti", "crlf-injection", "path-traversal",
+    "host-header-injection", "nosqli-error", "cmd-injection", "ldap-injection", "ssrf-metadata",
+  ];
   for (const id of ids) ev.probes[id] = [];
 
   // Host-header injection is per-target (one probe).
@@ -178,6 +185,54 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
         });
       }
     }
+
+    // --- NoSQL injection (error-based) ---
+    if (!budget.expired()) {
+      const u = new URL(c.url);
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, `'"{[$where]}`);
+      const res = await httpGet(u.toString(), { budget });
+      const err = res.body && NOSQL_ERRORS.exec(res.body);
+      if (!res.error && err) {
+        ev.probes["nosqli-error"].push({ location: u.toString(), confidence: "firm", evidence: `NoSQL hata imzası: ${err[0]}`, param: c.params[0] });
+      }
+    }
+
+    // --- OS command injection ---
+    if (!budget.expired()) {
+      const u = new URL(c.url);
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, "1;id|id`id`$(id)");
+      const res = await httpGet(u.toString(), { budget });
+      const err = res.body && CMD_OUTPUT.exec(res.body);
+      if (!res.error && err) {
+        ev.probes["cmd-injection"].push({ location: u.toString(), confidence: "confirmed", evidence: `Komut çıktısı yansıdı: ${err[0]}`, param: c.params[0] });
+      }
+    }
+
+    // --- LDAP injection (error-based) ---
+    if (!budget.expired()) {
+      const u = new URL(c.url);
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, "*)(&(uid=*))");
+      const res = await httpGet(u.toString(), { budget });
+      const err = res.body && LDAP_ERRORS.exec(res.body);
+      if (!res.error && err) {
+        ev.probes["ldap-injection"].push({ location: u.toString(), confidence: "firm", evidence: `LDAP hata imzası: ${err[0]}`, param: c.params[0] });
+      }
+    }
+
+    // --- SSRF → cloud metadata (confirmed only on real metadata leak) ---
+    if (!budget.expired()) {
+      const SSRF_PARAMS = /^(url|uri|link|src|source|dest|redirect|target|host|domain|site|feed|image|img|load|page|file|path|proxy|fetch|callback|data|reference|out|to|view|show|open|next|continue)$/i;
+      const ssrfParams = c.params.filter((p) => SSRF_PARAMS.test(p));
+      for (const p of ssrfParams.slice(0, 3)) {
+        if (budget.expired()) break;
+        const u = new URL(c.url);
+        u.searchParams.set(p, "http://169.254.169.254/latest/meta-data/");
+        const res = await httpGet(u.toString(), { budget });
+        if (!res.error && res.body && METADATA_LEAK.test(res.body)) {
+          ev.probes["ssrf-metadata"].push({ location: u.toString(), confidence: "confirmed", evidence: "Bulut metadata servisi içeriği yanıta yansıdı (169.254.169.254).", param: p });
+        }
+      }
+    }
   }
 
   const total = ids.reduce((n, id) => n + ev.probes[id].length, 0);
@@ -280,5 +335,45 @@ export const INJECTION_CHECKS: Check[] = [
     description: "Uygulama, Host başlığını güvenmeden yanıta/yönlendirmeye yansıtıyor; parola sıfırlama zehirlenmesi ve önbellek zehirlemesi için kötüye kullanılabilir.",
     remediation: "Host başlığını bir allowlist'e karşı doğrulayın; mutlak URL'leri sabit bir yapılandırılmış alan adından üretin.",
     references: ["https://portswigger.net/web-security/host-header"],
+  }),
+  probeCheck("nosqli-error", "nosqli-error", {
+    category: "injection",
+    title: "NoSQL Enjeksiyonu (hata tabanlı)",
+    severity: "CRITICAL",
+    cwe: "CWE-943",
+    owasp: "A03:2021 Injection",
+    description: "Bir parametreye NoSQL operatörü/özel karakter enjekte edildiğinde yanıtta NoSQL (ör. MongoDB) hata imzası belirdi; girdi doğrudan sorguya geçiyor olabilir.",
+    remediation: "Girdiyi türüne göre doğrulayın, operatör enjeksiyonunu engelleyin (ör. string beklenirken nesne kabul etmeyin); ODM/sürücü parametrelemesini kullanın.",
+    references: ["https://owasp.org/www-community/attacks/NoSQL_injection"],
+  }),
+  probeCheck("cmd-injection", "cmd-injection", {
+    category: "injection",
+    title: "İşletim Sistemi Komut Enjeksiyonu",
+    severity: "CRITICAL",
+    cwe: "CWE-78",
+    owasp: "A03:2021 Injection",
+    description: "Bir parametre üzerinden enjekte edilen `id` komutunun çıktısı (uid=…) yanıta yansıdı; sunucuda keyfi komut çalıştırılabiliyor.",
+    remediation: "Kabuk çağrılarında kullanıcı girdisi kullanmayın; argümanları dizi olarak geçen güvenli API'ler (execFile) kullanın ve girdiyi katı allowlist ile doğrulayın.",
+    references: ["https://owasp.org/www-community/attacks/Command_Injection"],
+  }),
+  probeCheck("ldap-injection", "ldap-injection", {
+    category: "injection",
+    title: "LDAP Enjeksiyonu (hata tabanlı)",
+    severity: "HIGH",
+    cwe: "CWE-90",
+    owasp: "A03:2021 Injection",
+    description: "Bir parametreye LDAP filtre meta-karakterleri enjekte edildiğinde LDAP hata imzası belirdi; kimlik doğrulama atlatma/veri sızdırma mümkün olabilir.",
+    remediation: "LDAP filtrelerinde kullanıcı girdisini kaçırın (RFC 4515) ve parametreli aramalar kullanın.",
+    references: ["https://owasp.org/www-community/attacks/LDAP_Injection"],
+  }),
+  probeCheck("ssrf-metadata", "ssrf-metadata", {
+    category: "injection",
+    title: "Sunucu Taraflı İstek Sahteciliği (SSRF) — bulut metadata",
+    severity: "CRITICAL",
+    cwe: "CWE-918",
+    owasp: "A10:2021 Server-Side Request Forgery",
+    description: "URL-benzeri bir parametre üzerinden bulut metadata servisi (169.254.169.254) içeriği okundu; bu genellikle geçici bulut kimlik bilgilerinin çalınmasına yol açar.",
+    remediation: "Dış URL çağrılarını allowlist'e alın, iç/link-local IP aralıklarını (169.254.0.0/16 dahil) reddedin, DNS yeniden bağlamayı engelleyin, IMDSv2'yi zorunlu kılın.",
+    references: ["https://portswigger.net/web-security/ssrf"],
   }),
 ];
