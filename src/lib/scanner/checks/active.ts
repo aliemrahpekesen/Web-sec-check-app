@@ -49,7 +49,7 @@ function candidates(ev: Evidence, limit: number): Candidate[] {
 
 const SQL_ERRORS =
   /(SQL syntax|mysql_fetch|ORA-\d{5}|PostgreSQL.*ERROR|SQLite\/JDBCDriver|Unclosed quotation mark|quoted string not properly terminated|SQLSTATE\[|Warning: mysqli|valid MySQL result|com\.mysql\.jdbc)/i;
-const NOSQL_ERRORS = /(MongoError|MongoDB|CastError|BSONError|E11000 duplicate|CouchDB|\$where|Unexpected token.*JSON|failed to parse.*ObjectId)/i;
+const NOSQL_ERRORS = /(MongoError|MongoServerError|MongoParseError|BSONError|BSONTypeError|E11000 duplicate key|CastError:.*(ObjectId|Number)|failed to parse.*ObjectId|couchdb.*(error|reason)|"\$where")/i;
 const LDAP_ERRORS = /(javax\.naming|com\.sun\.jndi\.ldap|LDAPException|Invalid DN syntax|LDAP: error code|supplied argument is not a valid ldap)/i;
 const CMD_OUTPUT = /uid=\d+\([a-z0-9_-]+\)\s+gid=\d+\(/i; // `id` command output
 const METADATA_LEAK = /(ami-id|instance-id|iam\/security-credentials|instance-action|placement\/availability-zone|"AccessKeyId")/i;
@@ -84,6 +84,12 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
   for (const c of cands) {
     if (budget.expired()) break;
 
+    // Clean baseline for this endpoint — error-based probes must show an error
+    // signature that is ABSENT without injection, or it's a false positive
+    // (a page that merely contains the word "MongoDB" is not vulnerable).
+    const baseRes = await httpGet(c.url, { budget });
+    const baseBody = baseRes.error ? "" : baseRes.body;
+
     // --- Reflected XSS ---
     {
       const m = marker();
@@ -107,7 +113,7 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
       for (const p of c.params.slice(0, 4)) u.searchParams.set(p, `'"\`` + "1");
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && SQL_ERRORS.exec(res.body);
-      if (!res.error && err) {
+      if (!res.error && err && !SQL_ERRORS.test(baseBody)) {
         ev.probes["sqli-error"].push({
           location: u.toString(),
           confidence: "firm",
@@ -192,7 +198,7 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
       for (const p of c.params.slice(0, 3)) u.searchParams.set(p, `'"{[$where]}`);
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && NOSQL_ERRORS.exec(res.body);
-      if (!res.error && err) {
+      if (!res.error && err && !NOSQL_ERRORS.test(baseBody)) {
         ev.probes["nosqli-error"].push({ location: u.toString(), confidence: "firm", evidence: `NoSQL hata imzası: ${err[0]}`, param: c.params[0] });
       }
     }
@@ -214,7 +220,7 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
       for (const p of c.params.slice(0, 3)) u.searchParams.set(p, "*)(&(uid=*))");
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && LDAP_ERRORS.exec(res.body);
-      if (!res.error && err) {
+      if (!res.error && err && !LDAP_ERRORS.test(baseBody)) {
         ev.probes["ldap-injection"].push({ location: u.toString(), confidence: "firm", evidence: `LDAP hata imzası: ${err[0]}`, param: c.params[0] });
       }
     }
