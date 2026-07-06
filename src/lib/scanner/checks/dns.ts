@@ -352,7 +352,7 @@ export const DNS_EMAIL_CHECKS: Check[] = [
     evaluate(ev) {
       if (!ev.dns.resolved) return null;
       if (ev.dns.dmarc) return { status: "pass" };
-      if (ev.dns.txtResolved === false) return null; // DNS TXT flaky → can't conclude "missing"
+      if (ev.dns.dmarcResolved === false) return null; // _dmarc lookup failed → can't conclude "missing"
       // DMARC yalnızca posta gönderen/alan bir alan için anlamlı; MX veya SPF yoksa da öneririz.
       const relevant = ev.dns.mx.length > 0 || Boolean(ev.dns.spf);
       return {
@@ -659,11 +659,12 @@ export const DNS_EMAIL_CHECKS: Check[] = [
     evaluate(ev) {
       if (!ev.dns.resolved) return null;
       if (ev.dns.caa.length > 0) return { status: "pass" };
+      if (ev.dns.caaResolved === false) return null; // CAA lookup failed → can't conclude "missing"
       return {
         status: "fail",
         severity: "LOW",
         confidence: "confirmed",
-        evidence: "Alan adında CAA kaydı bulunamadı; herhangi bir CA sertifika kesebilir.",
+        evidence: "Alan adında (ve üst/kök alan adında) CAA kaydı bulunamadı; herhangi bir CA sertifika kesebilir.",
       };
     },
   },

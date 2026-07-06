@@ -44,30 +44,57 @@ deterministik motora düşer ve yine tam çalışır.
 - **`@anthropic-ai/sdk`** — Claude **Opus 4.8** (`claude-opus-4-8`), adaptive thinking, tool use
 - **Tailwind** — Matrix temalı futuristic arayüz
 
-## Hızlı başlangıç
+## Lokal Hızlı Başlangıç
+
+Gereksinim: **Node.js ≥ 20**. İki yol var — çoğu kişi **Seçenek A**'yı ister.
+
+### Seçenek A — Tek komut, altyapısız (önerilen)
+
+Veritabanı, Redis veya ayrı worker gerekmez. Her tarama isteğin içinde canlı koşar (stateless mod).
 
 ```bash
-# 1) Altyapı (Postgres + Redis)
-docker compose up -d
-
-# 2) Bağımlılıklar + ortam
+git clone https://github.com/aliemrahpekesen/Web-sec-check-app.git
+cd Web-sec-check-app
 npm install
-cp .env.example .env
-#   .env içine isteğe bağlı ANTHROPIC_API_KEY ekleyin (AI motoru için)
-#   Yerel test için aktif tarama doğrulamasını atlamak isterseniz:
-#     SENTINEL_SKIP_VERIFICATION=true
-
-# 3) Veritabanı şeması (repo başlangıç migration'ını içerir)
-npm run prisma:deploy    # migration'ları uygular
-npm run db:seed
-
-# 4) İki süreç (iki terminal):
-npm run dev              # Next.js  → http://localhost:3000
-npm run worker           # BullMQ worker (taramaları işler)
+npm run dev:local            # → http://localhost:3000
 ```
 
-> **Not:** Web sunucusu ve worker ayrı süreçlerdir. Yüksek trafik için worker'ı yatay
-> ölçekleyin (`SENTINEL_WORKER_CONCURRENCY` ve birden çok worker süreci).
+Hepsi bu. Tarayıcıda `http://localhost:3000` açın, bir URL verin, profili seçin, tarayın.
+
+- **AI motorunu (Claude Opus 4.8) açmak için:** başlatmadan önce `ANTHROPIC_API_KEY` set edin
+  (`export ANTHROPIC_API_KEY=sk-ant-...` sonra `npm run dev:local`). Ayarlamazsanız deterministik
+  motor 774 kontrolün tamamını zaten çalıştırır.
+- **localhost / iç ağ hedeflerini taramak için** (SSRF koruması varsayılan olarak engeller):
+  `SENTINEL_ALLOW_PRIVATE_TARGETS=true npm run dev:local`.
+- **Prod derlemesini lokalde çalıştırmak:** `npm run build && npm run start:local`.
+
+### Seçenek B — Tam yığın (kalıcı geçmiş + worker)
+
+Taramaları PostgreSQL'de saklamak, çok kiracılı çalışmak ve worker'ı yatay ölçeklemek için:
+
+```bash
+docker compose up -d          # PostgreSQL + Redis
+npm install
+cp .env.example .env          # DATABASE_URL/DIRECT_URL/REDIS_URL varsayılanları compose ile uyumlu
+npm run prisma:deploy         # migration'ları uygular
+npm run db:seed
+
+# İki terminal:
+npm run dev                   # Next.js → http://localhost:3000
+npm run worker                # BullMQ worker (taramaları işler)
+```
+
+> Web sunucusu ve worker ayrı süreçlerdir; yüksek trafikte worker'ı ölçekleyin
+> (`SENTINEL_WORKER_CONCURRENCY` + birden çok worker süreci).
+
+### Doğrulama komutları
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm run lint        # ESLint
+npm test            # Vitest (birim testleri)
+npm run build       # prisma generate + next build
+```
 
 ## Güvenlik & yetki modeli
 

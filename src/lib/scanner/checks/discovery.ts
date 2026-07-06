@@ -21,7 +21,10 @@ export const DISCOVERY_CHECKS: Check[] = [
     },
   },
   {
-    id: "api-graphql-endpoint",
+    // Distinct from apihttp.ts's path-probe `api-graphql-endpoint`: this one is
+    // driven by the introspection probe result (ev.graphql). Both are INFO and
+    // dedupe by location; a shared id would let the registry drop this one.
+    id: "api-graphql-endpoint-probe",
     category: "api",
     title: "GraphQL uç noktası tespit edildi",
     severity: "INFO",

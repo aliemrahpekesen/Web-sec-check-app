@@ -180,22 +180,12 @@ export const TLS_CHECKS: Check[] = [
       return k > 0 && k < 2048 && k >= 512 ? { status: "fail", location: `https://${ev.host}`, evidence: `${k} bit anahtar` } : { status: "pass" };
     },
   },
-  {
-    id: "crypto-weak-signature",
-    category: "crypto",
-    title: "Zayıf sertifika imza algoritması (SHA-1/MD5)",
-    severity: "MEDIUM",
-    cwe: "CWE-328",
-    owasp: "A02:2021 Cryptographic Failures",
-    description: "Sertifika SHA-1 veya MD5 ile imzalanmış; bunlar çakışma saldırılarına karşı kırılmıştır.",
-    remediation: "SHA-256+ ile imzalanmış bir sertifika alın.",
-    references: [SSLLABS],
-    evaluate(ev) {
-      const s = ev.tls.sigAlg;
-      if (!tlsReady(ev) || !s) return null;
-      return /sha1|md5/i.test(s) ? { status: "fail", location: `https://${ev.host}`, evidence: `sigAlg: ${s}` } : { status: "pass" };
-    },
-  },
+  // NOTE: a "weak certificate signature (SHA-1/MD5)" check used to live here but
+  // was removed — Node's TLS/X509 API exposes no signature-algorithm field, so
+  // ev.tls.sigAlg was always undefined and the check could never fire. SHA-1
+  // leaf certs are also extinct (CAs stopped issuing them in 2016; browsers
+  // reject them), so the check carried no real signal. Re-add only with a DER
+  // parser that can read the signatureAlgorithm OID directly.
   {
     id: "tls-long-validity",
     category: "tls",

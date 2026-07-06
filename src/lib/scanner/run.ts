@@ -2,6 +2,7 @@
 // dynamic workflow when an API key is present, deterministic otherwise),
 // finalizes scoring, and updates the scan record. The AI path falls back to
 // deterministic on any orchestrator error so a scan never dies on an API hiccup.
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { aiEnabled } from "../env";
 import { createEmitter } from "../events";
@@ -39,6 +40,9 @@ export async function runScan(job: ScanJobData): Promise<void> {
       } catch {
         engine = "deterministic";
         await emit({ type: "log", level: "warn", message: "AI motoru başarısız; deterministik motora geçildi." });
+        // The AI path may have already persisted some findings before it threw;
+        // clear them so the deterministic pass doesn't produce duplicate rows.
+        await prisma.finding.deleteMany({ where: { scanId } });
         result = await deterministicScan(target, host, profile, emit);
       }
     } else {
@@ -55,6 +59,9 @@ export async function runScan(job: ScanJobData): Promise<void> {
         grade,
         pagesCrawled: result.pagesCrawled,
         requestsMade: result.requestsMade,
+        coverage: result.coverage
+          ? (result.coverage as unknown as Prisma.InputJsonValue)
+          : Prisma.JsonNull,
         completedAt: new Date(),
       },
     });

@@ -5,6 +5,7 @@
 // stay pure functions. ev.probes[id] === undefined means "did not run"
 // (→ N/A); [] means "ran, clean" (→ PASS); non-empty means findings.
 import { httpGet } from "../http";
+import type { HttpResult, RequestBudget } from "../http";
 import type { Emit } from "./types";
 import type { ActiveProbeResult, Check, Evidence } from "./types";
 
@@ -54,6 +55,29 @@ const LDAP_ERRORS = /(javax\.naming|com\.sun\.jndi\.ldap|LDAPException|Invalid D
 const CMD_OUTPUT = /uid=\d+\([a-z0-9_-]+\)\s+gid=\d+\(/i; // `id` command output
 const METADATA_LEAK = /(ami-id|instance-id|iam\/security-credentials|instance-action|placement\/availability-zone|"AccessKeyId")/i;
 
+// When a payload injected into several params at once triggers, re-test each
+// param alone to attribute the finding to the exact parameter. The clean case
+// stays at one request; these extra probes only run on a real hit (rare) and are
+// budget-guarded. Returns the offending param, or undefined when it can't be
+// pinned — an honest result, unlike blindly labelling params[0].
+async function pinParam(
+  c: Candidate,
+  budget: RequestBudget,
+  payload: string,
+  detect: (res: HttpResult) => boolean,
+  redirect: "follow" | "manual" = "follow",
+): Promise<string | undefined> {
+  if (c.params.length <= 1) return c.params[0];
+  for (const p of c.params.slice(0, 4)) {
+    if (budget.expired()) break;
+    const u = new URL(c.url);
+    u.searchParams.set(p, payload);
+    const res = await httpGet(u.toString(), { budget, redirect });
+    if (!res.error && detect(res)) return p;
+  }
+  return undefined;
+}
+
 export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
   const budget = ev.budget;
   const cap = ev.profile === "DEEP" ? 20 : 8;
@@ -63,18 +87,33 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
     "xss-reflected", "open-redirect", "sqli-error", "ssti", "crlf-injection", "path-traversal",
     "host-header-injection", "nosqli-error", "cmd-injection", "ldap-injection", "ssrf-metadata",
   ];
-  for (const id of ids) ev.probes[id] = [];
+  // A probe id becomes PASS/FAIL only once it has actually run at least once
+  // (ev.probes[id] set to []). Left undefined → the check reports N/A ("did not
+  // run"), never a misleading PASS. This matters when there are no injectable
+  // params, or the budget is exhausted before a probe type gets a turn.
+  const ensure = (id: string) => {
+    if (!ev.probes[id]) ev.probes[id] = [];
+  };
 
-  // Host-header injection is per-target (one probe).
+  // Host-header injection is per-target (one probe). fetch() forbids overriding
+  // the real Host header, so the realistic vector is a reverse proxy trusting
+  // X-Forwarded-Host / X-Host / Forwarded and reflecting it into an absolute URL
+  // (a redirect Location) or the body — that is what we inject and detect.
   if (!budget.expired()) {
+    ensure("host-header-injection");
     const m = marker();
-    const res = await httpGet(ev.target, { budget, headers: { Host: `${m}.example.com` }, redirect: "manual" });
+    const bad = `${m}.example.com`;
+    const res = await httpGet(ev.target, {
+      budget,
+      headers: { "X-Forwarded-Host": bad, "X-Host": bad, "X-Forwarded-Server": bad, Forwarded: `host=${bad}` },
+      redirect: "manual",
+    });
     const loc = res.headers["location"] ?? "";
-    if (!res.error && (loc.includes(m) || res.body.includes(`${m}.example.com`))) {
+    if (!res.error && (loc.includes(bad) || res.body.includes(bad))) {
       ev.probes["host-header-injection"].push({
         location: ev.target,
         confidence: "firm",
-        evidence: `Host başlığı yanıta yansıdı: ${m}.example.com`,
+        evidence: `Güvenilmeyen X-Forwarded-Host değeri yönlendirmeye/gövdeye yansıdı: ${bad}`,
       });
     }
   }
@@ -92,71 +131,83 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
 
     // --- Reflected XSS ---
     {
+      ensure("xss-reflected");
       const m = marker();
       const payload = `"><svg/onload=${m}>`;
       const u = new URL(c.url);
       for (const p of c.params.slice(0, 4)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       if (!res.error && res.body.includes(payload)) {
+        const param = await pinParam(c, budget, payload, (r) => r.body.includes(payload));
         ev.probes["xss-reflected"].push({
           location: u.toString(),
           confidence: "firm",
           evidence: `Payload kodlanmadan yansıdı:\n${payload}`,
-          param: c.params[0],
+          param,
         });
       }
     }
 
     // --- SQL injection (error-based) ---
     if (!budget.expired()) {
+      ensure("sqli-error");
+      const payload = `'"\`` + "1";
       const u = new URL(c.url);
-      for (const p of c.params.slice(0, 4)) u.searchParams.set(p, `'"\`` + "1");
+      for (const p of c.params.slice(0, 4)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && SQL_ERRORS.exec(res.body);
       if (!res.error && err && !SQL_ERRORS.test(baseBody)) {
+        const param = await pinParam(c, budget, payload, (r) => SQL_ERRORS.test(r.body));
         ev.probes["sqli-error"].push({
           location: u.toString(),
           confidence: "firm",
           evidence: `Veritabanı hata imzası: ${err[0]}`,
-          param: c.params[0],
+          param,
         });
       }
     }
 
     // --- SSTI ---
     if (!budget.expired()) {
+      ensure("ssti");
       const m = marker();
+      // 7*7 in several template dialects; the marker guards against coincidental 49.
+      const payload = `${m}{{7*7}}`;
       const u = new URL(c.url);
-      // 7*7 in several template dialects; 's7ntnl' guards against coincidental 49.
-      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, `${m}{{7*7}}`);
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       if (!res.error && res.body.includes(`${m}49`)) {
+        const param = await pinParam(c, budget, payload, (r) => r.body.includes(`${m}49`));
         ev.probes["ssti"].push({
           location: u.toString(),
           confidence: "firm",
           evidence: `Şablon ifadesi sunucuda değerlendirildi: {{7*7}} → 49`,
-          param: c.params[0],
+          param,
         });
       }
     }
 
     // --- Path traversal / LFI ---
     if (!budget.expired()) {
+      ensure("path-traversal");
+      const payload = "../../../../../../etc/passwd";
       const u = new URL(c.url);
-      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, "../../../../../../etc/passwd");
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       if (!res.error && /root:.*:0:0:/.test(res.body)) {
+        const param = await pinParam(c, budget, payload, (r) => /root:.*:0:0:/.test(r.body));
         ev.probes["path-traversal"].push({
           location: u.toString(),
           confidence: "confirmed",
           evidence: "/etc/passwd içeriği yansıdı (root:...:0:0:)",
-          param: c.params[0],
+          param,
         });
       }
     }
 
     // --- Open redirect ---
     if (!budget.expired()) {
+      ensure("open-redirect");
       const evil = "https://sentinel-redirect-test.example.com/";
       const redirectable = c.params.filter((p) => REDIRECT_PARAMS.has(p.toLowerCase()));
       for (const p of redirectable.slice(0, 3)) {
@@ -178,55 +229,85 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
 
     // --- CRLF / response header injection ---
     if (!budget.expired()) {
+      ensure("crlf-injection");
       const m = marker();
+      // Build the query RAW: URLSearchParams.set() would percent-encode the
+      // %0d%0a a second time, so the server would decode it back to the literal
+      // text "%0d%0a" and never see a real CR/LF. Hand-writing the search string
+      // keeps the single-encoded payload the server decodes into header breaks.
+      const injParams = c.params.slice(0, 3);
+      const raw = injParams.map((p) => `${encodeURIComponent(p)}=x%0d%0aX-Sentinel:${m}`).join("&");
       const u = new URL(c.url);
-      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, `x%0d%0aX-Sentinel:${m}`);
+      u.search = "?" + raw;
       const res = await httpGet(u.toString(), { budget, redirect: "manual" });
-      if (!res.error && (res.headers["x-sentinel"] === m)) {
+      if (!res.error && res.headers["x-sentinel"] === m) {
+        let param: string | undefined = injParams.length === 1 ? injParams[0] : undefined;
+        if (injParams.length > 1) {
+          for (const p of injParams) {
+            if (budget.expired()) break;
+            const us = new URL(c.url);
+            us.search = `?${encodeURIComponent(p)}=x%0d%0aX-Sentinel:${m}`;
+            const r = await httpGet(us.toString(), { budget, redirect: "manual" });
+            if (!r.error && r.headers["x-sentinel"] === m) {
+              param = p;
+              break;
+            }
+          }
+        }
         ev.probes["crlf-injection"].push({
           location: u.toString(),
           confidence: "confirmed",
           evidence: `Enjekte edilen X-Sentinel başlığı yanıtta göründü.`,
-          param: c.params[0],
+          param,
         });
       }
     }
 
     // --- NoSQL injection (error-based) ---
     if (!budget.expired()) {
+      ensure("nosqli-error");
+      const payload = `'"{[$where]}`;
       const u = new URL(c.url);
-      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, `'"{[$where]}`);
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && NOSQL_ERRORS.exec(res.body);
       if (!res.error && err && !NOSQL_ERRORS.test(baseBody)) {
-        ev.probes["nosqli-error"].push({ location: u.toString(), confidence: "firm", evidence: `NoSQL hata imzası: ${err[0]}`, param: c.params[0] });
+        const param = await pinParam(c, budget, payload, (r) => NOSQL_ERRORS.test(r.body));
+        ev.probes["nosqli-error"].push({ location: u.toString(), confidence: "firm", evidence: `NoSQL hata imzası: ${err[0]}`, param });
       }
     }
 
     // --- OS command injection ---
     if (!budget.expired()) {
+      ensure("cmd-injection");
+      const payload = "1;id|id`id`$(id)";
       const u = new URL(c.url);
-      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, "1;id|id`id`$(id)");
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && CMD_OUTPUT.exec(res.body);
       if (!res.error && err) {
-        ev.probes["cmd-injection"].push({ location: u.toString(), confidence: "confirmed", evidence: `Komut çıktısı yansıdı: ${err[0]}`, param: c.params[0] });
+        const param = await pinParam(c, budget, payload, (r) => CMD_OUTPUT.test(r.body));
+        ev.probes["cmd-injection"].push({ location: u.toString(), confidence: "confirmed", evidence: `Komut çıktısı yansıdı: ${err[0]}`, param });
       }
     }
 
     // --- LDAP injection (error-based) ---
     if (!budget.expired()) {
+      ensure("ldap-injection");
+      const payload = "*)(&(uid=*))";
       const u = new URL(c.url);
-      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, "*)(&(uid=*))");
+      for (const p of c.params.slice(0, 3)) u.searchParams.set(p, payload);
       const res = await httpGet(u.toString(), { budget });
       const err = res.body && LDAP_ERRORS.exec(res.body);
       if (!res.error && err && !LDAP_ERRORS.test(baseBody)) {
-        ev.probes["ldap-injection"].push({ location: u.toString(), confidence: "firm", evidence: `LDAP hata imzası: ${err[0]}`, param: c.params[0] });
+        const param = await pinParam(c, budget, payload, (r) => LDAP_ERRORS.test(r.body));
+        ev.probes["ldap-injection"].push({ location: u.toString(), confidence: "firm", evidence: `LDAP hata imzası: ${err[0]}`, param });
       }
     }
 
     // --- SSRF → cloud metadata (confirmed only on real metadata leak) ---
     if (!budget.expired()) {
+      ensure("ssrf-metadata");
       const SSRF_PARAMS = /^(url|uri|link|src|source|dest|redirect|target|host|domain|site|feed|image|img|load|page|file|path|proxy|fetch|callback|data|reference|out|to|view|show|open|next|continue)$/i;
       const ssrfParams = c.params.filter((p) => SSRF_PARAMS.test(p));
       for (const p of ssrfParams.slice(0, 3)) {
@@ -241,7 +322,7 @@ export async function runActiveProbes(ev: Evidence, emit: Emit): Promise<void> {
     }
   }
 
-  const total = ids.reduce((n, id) => n + ev.probes[id].length, 0);
+  const total = ids.reduce((n, id) => n + (ev.probes[id]?.length ?? 0), 0);
   await emit({ type: "log", level: "info", message: `Aktif prob('lar): ${cands.length} uç test edildi, ${total} doğrulanmış bulgu.` });
 }
 

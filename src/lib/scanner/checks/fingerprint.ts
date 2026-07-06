@@ -740,7 +740,7 @@ const LIB_CHECKS: Check[] = [
   libCheck({
     id: "fp-angularjs-eol",
     title: "AngularJS (1.x) kullanım sonu",
-    regex: /angular(?:\.js|js)?[/@-]?(1)\.(\d+)(?:\.(\d+))?/i,
+    regex: /\bangular(?:\.min)?(?:\.js|js)?[/@-]?(1)\.(\d+)(?:\.(\d+))?/i,
     description: "AngularJS 1.x resmi olarak kullanım sonudur (EoL) ve şablon enjeksiyonu/sandbox kaçışı sınıfı sorunlara açıktır; güvenlik yaması almaz.",
     remediation: "AngularJS 1.x'ten modern bir çerçeveye (Angular 2+, React, Vue) geçiş planlayın.",
     references: ["https://docs.angularjs.org/misc/version-support-status"],

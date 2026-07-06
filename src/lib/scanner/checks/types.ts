@@ -110,7 +110,9 @@ export interface DnsEvidence {
   dmarcPolicy?: string;
   dkimHint?: boolean;
   mtaSts?: boolean;
-  txtResolved?: boolean; // false = the TXT lookup failed → "missing" is unknown
+  txtResolved?: boolean; // false = the apex TXT lookup failed → "missing" is unknown
+  dmarcResolved?: boolean; // false = the _dmarc lookup failed → "missing" is unknown
+  caaResolved?: boolean; // false = the CAA lookup failed → "missing" is unknown
   error?: string;
 }
 

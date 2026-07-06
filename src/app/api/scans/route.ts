@@ -60,9 +60,28 @@ export async function POST(req: Request) {
 
   // Stateless demo (no DB): the whole scan runs inside the SSE stream; encode
   // the parameters into the opaque scan id and return immediately.
+  //
+  // SECURITY: there is no database here to record domain-ownership proof, so the
+  // active-profile gate below (which the full stack enforces) cannot run. Active
+  // probing (STANDARD/DEEP) of a host the operator hasn't explicitly allowlisted
+  // — or globally opted into via SENTINEL_SKIP_VERIFICATION — would turn the demo
+  // into an open attack tool. Downgrade unverified active requests to PASSIVE.
   if (stateless()) {
-    const id = encodeScanId({ target: url, host, profile });
-    return NextResponse.json({ id, target: url, origin, profile, status: "QUEUED" }, { status: 201 });
+    const effectiveProfile = profile !== "PASSIVE" && !isAllowlisted(host) ? "PASSIVE" : profile;
+    const id = encodeScanId({ target: url, host, profile: effectiveProfile });
+    return NextResponse.json(
+      {
+        id,
+        target: url,
+        origin,
+        profile: effectiveProfile,
+        status: "QUEUED",
+        ...(effectiveProfile !== profile
+          ? { notice: "Doğrulama olmadan aktif tarama yapılamaz; PASSIVE profile düşürüldü." }
+          : {}),
+      },
+      { status: 201 },
+    );
   }
 
   const org = await getDefaultOrg();

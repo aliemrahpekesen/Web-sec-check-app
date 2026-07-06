@@ -52,11 +52,24 @@ export function rateLimit(key: string, limit = env.rateLimitPerMinute): RateResu
   return { ok: true, remaining: limit - bucket.hits.length, limit, retryAfterSec: 0 };
 }
 
-// Best-effort client IP from proxy headers (Vercel/most reverse proxies set
-// these). Falls back to a constant so the limiter still bounds total traffic.
+// Best-effort client IP from proxy headers. SECURITY: the leftmost value of a
+// multi-valued `X-Forwarded-For` is fully client-controlled — an attacker can
+// prepend an arbitrary/rotating IP to dodge the per-IP limit or pin a victim.
+// Prefer single-value headers that the *trusted edge* (Vercel/Cloudflare) sets
+// itself and a client cannot append to; only fall back to XFF, and then to the
+// value the edge appended (rightmost), never the client-controlled leftmost.
 export function clientIp(req: Request): string {
   const h = req.headers;
+  const trusted =
+    h.get("x-vercel-forwarded-for") ||
+    h.get("cf-connecting-ip") ||
+    h.get("x-real-ip");
+  if (trusted) return trusted.trim();
   const fwd = h.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0]!.trim();
-  return h.get("x-real-ip") || h.get("cf-connecting-ip") || "unknown";
+  if (fwd) {
+    const parts = fwd.split(",").map((p) => p.trim()).filter(Boolean);
+    // Rightmost = appended by the closest (trusted) proxy; safer than leftmost.
+    if (parts.length) return parts[parts.length - 1]!;
+  }
+  return "unknown";
 }

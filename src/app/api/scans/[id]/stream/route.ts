@@ -100,11 +100,20 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
 
       const terminal = (s: string) => ["COMPLETED", "FAILED", "CANCELLED"].includes(s);
       if (terminal(scan.status)) {
+        // Re-attach the persisted coverage/engine metadata so a reloaded scan
+        // still shows the "X checks ran, Y passed" trust panel (it was otherwise
+        // only carried by the live "done" event and lost on refresh).
         send({
           type: "done",
           status: scan.status,
           riskScore: scan.riskScore ?? undefined,
           grade: scan.grade ?? undefined,
+          meta: {
+            engine: scan.engine,
+            pagesCrawled: scan.pagesCrawled,
+            requestsMade: scan.requestsMade,
+            coverage: scan.coverage ?? undefined,
+          },
         });
         controller.close();
         return;

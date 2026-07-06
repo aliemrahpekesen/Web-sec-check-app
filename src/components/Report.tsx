@@ -42,6 +42,7 @@ export interface FullScan {
   requestsMade: number;
   error: string | null;
   findings: FindingRow[];
+  coverage?: CoverageData | null; // persisted coverage (present on reload of a completed scan)
 }
 
 const ORDER: Severity[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
