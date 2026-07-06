@@ -5,6 +5,8 @@
   "description": "SentinelScan — enterprise SaaS web application security scanner powered by Claude Opus 4.8 dynamic workflows",
   "scripts": {
     "dev": "next dev",
+    "dev:local": "node scripts/local.mjs dev",
+    "start:local": "node scripts/local.mjs start",
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",

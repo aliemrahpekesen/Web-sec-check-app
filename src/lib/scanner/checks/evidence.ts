@@ -69,7 +69,7 @@ function deepTls(host: string): Promise<TlsEvidence> {
     });
     socket.setTimeout(8000, () => {
       socket.destroy();
-      finish({ reachable: false, a: [], error: "timeout" } as unknown as TlsEvidence);
+      finish({ reachable: false, error: "timeout" });
     });
     socket.on("error", (e) => finish({ reachable: false, error: e.message } as TlsEvidence));
   });
@@ -110,6 +110,19 @@ async function collectDns(host: string): Promise<DnsEvidence> {
   out.dmarcPolicy = out.dmarc ? /p=(\w+)/i.exec(out.dmarc)?.[1]?.toLowerCase() : undefined;
   const mtaSts = await safe(dns.resolveTxt(`_mta-sts.${host}`), []);
   out.mtaSts = mtaSts.some((c) => /v=STSv1/i.test(c.join("")));
+  // Best-effort DKIM detection via common selectors (only meaningful with MX).
+  // Passive and inexact — the check that reads this is INFO/tentative.
+  if (out.mx.length > 0) {
+    const selectors = ["default", "google", "selector1", "selector2", "k1", "dkim", "mail", "s1", "s2", "smtp"];
+    const hits = await Promise.all(
+      selectors.map((s) =>
+        safe(dns.resolveTxt(`${s}._domainkey.${host}`), [] as string[][]).then((r) =>
+          r.some((c) => /v=DKIM1|(^|;)\s*[kp]=/i.test(c.join(""))),
+        ),
+      ),
+    );
+    out.dkimHint = hits.some(Boolean);
+  }
   out.resolved = out.a.length > 0 || out.aaaa.length > 0 || out.mx.length > 0;
   return out;
 }
