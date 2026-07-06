@@ -218,13 +218,28 @@ describe("accuracy — detects real problems on a vulnerable target", () => {
     expect(f!.severity).toBe("HIGH");
   });
 
-  it("does not report SPF/DMARC missing when the TXT lookup failed", () => {
+  it("does not report SPF/DMARC/CAA missing when the DNS lookups failed", () => {
+    // A failing resolver leaves every "resolved" flag false — evidence collection
+    // sets txt/_dmarc/CAA independently, so a hand-built snapshot of that scenario
+    // must clear all three. "Can't check" must never read as "absent".
     const ev = evidence({
-      dns: { resolved: true, a: ["1.1.1.1"], aaaa: [], mx: ["mx"], ns: ["ns1"], txt: [], caa: [], txtResolved: false },
+      dns: {
+        resolved: true,
+        a: ["1.1.1.1"],
+        aaaa: [],
+        mx: ["mx"],
+        ns: ["ns1"],
+        txt: [],
+        caa: [],
+        txtResolved: false,
+        dmarcResolved: false,
+        caaResolved: false,
+      },
     });
     const ids = runChecks(ALL_CHECKS, ev).findings.map((f) => f.checkId);
     expect(ids).not.toContain("dns-spf-missing");
     expect(ids).not.toContain("dns-dmarc-missing");
+    expect(ids).not.toContain("dns-caa-missing");
   });
 
   it("flags the exposed .env file", () => {

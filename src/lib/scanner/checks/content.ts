@@ -44,13 +44,17 @@ const SECRETS: SecretSig[] = [
   { id: "stripe-live", title: "Stripe canlı gizli anahtarı", severity: "CRITICAL", re: /\bsk_live_[0-9A-Za-z]{24,}\b/, confidence: "confirmed" },
   { id: "stripe-restricted", title: "Stripe kısıtlı anahtarı", severity: "HIGH", re: /\brk_live_[0-9A-Za-z]{24,}\b/, confidence: "confirmed" },
   { id: "sendgrid", title: "SendGrid API anahtarı", severity: "HIGH", re: /\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{43}\b/, confidence: "confirmed" },
-  { id: "mailgun", title: "Mailgun API anahtarı", severity: "MEDIUM", re: /\bkey-[0-9a-f]{32}\b/, confidence: "firm" },
-  { id: "twilio-sk", title: "Twilio API anahtarı", severity: "MEDIUM", re: /\bSK[0-9a-fA-F]{32}\b/, confidence: "firm" },
+  // Require a quote/assignment boundary so 'key-<md5>' asset fingerprints /
+  // CSS classes don't match; tentative because the shape collides with hex ids.
+  { id: "mailgun", title: "Mailgun API anahtarı (olası)", severity: "MEDIUM", re: /["'=:\s]key-[0-9a-f]{32}(?=["'\s]|$)/i, confidence: "tentative" },
+  { id: "twilio-sk", title: "Twilio API anahtarı (olası)", severity: "MEDIUM", re: /\bSK[0-9a-fA-F]{32}\b/, confidence: "tentative" },
   { id: "square", title: "Square erişim token'ı", severity: "HIGH", re: /\bsq0atp-[0-9A-Za-z_\-]{22}\b/, confidence: "confirmed" },
   { id: "braintree", title: "Braintree/PayPal production token", severity: "HIGH", re: /access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}/, confidence: "confirmed" },
   { id: "facebook", title: "Facebook erişim token'ı", severity: "MEDIUM", re: /\bEAACEdEose0cBA[0-9A-Za-z]+/, confidence: "firm" },
   { id: "private-key", title: "Özel anahtar bloğu (PEM)", severity: "CRITICAL", re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/, confidence: "confirmed" },
-  { id: "jwt", title: "JWT sayfada gömülü", severity: "MEDIUM", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/, confidence: "firm" },
+  // Many JWTs on a page are public by design (Supabase anon key, OIDC id_token);
+  // tentative, and the description tells the reader to verify the claims.
+  { id: "jwt", title: "JWT sayfada gömülü (olası)", severity: "LOW", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/, confidence: "tentative" },
   { id: "mongodb-uri", title: "MongoDB bağlantı dizesi", severity: "HIGH", re: /mongodb(?:\+srv)?:\/\/[^\s"'<>]+:[^\s"'<>@]+@[^\s"'<>]+/, confidence: "confirmed" },
   { id: "sql-uri", title: "SQL bağlantı dizesi (kimlikli)", severity: "HIGH", re: /\b(?:postgres(?:ql)?|mysql|mariadb):\/\/[^\s:"'<>]+:[^\s@"'<>]+@[^\s"'<>]+/, confidence: "confirmed" },
   { id: "basic-auth-url", title: "URL içinde gömülü kimlik bilgisi", severity: "MEDIUM", re: /\bhttps?:\/\/[^/\s:@"'<>]+:[^/\s:@"'<>]+@[^\s"'<>]+/, confidence: "firm" },
@@ -66,8 +70,14 @@ function secretCheck(sig: SecretSig): Check {
     severity: sig.severity,
     cwe: "CWE-798",
     owasp: "A07:2021 Identification and Authentication Failures",
-    description: `İstemciye sunulan HTML/JS içeriğinde ${sig.title} kalıbı bulundu. Bu, sabit kodlanmış bir sırdır ve derhal iptal edilmelidir.`,
-    remediation: "Sırrı kaynaktan kaldırın ve HEMEN döndürün (rotate). İstemci tarafına sır koymayın; gizli değerleri sunucu tarafında tutun.",
+    description:
+      (sig.confidence ?? "firm") === "tentative"
+        ? `İstemciye sunulan HTML/JS içeriğinde ${sig.title} kalıbına benzeyen bir dize bulundu. Bu bir sır OLABİLİR ama bazı token'lar (ör. Supabase anon anahtarı, herkese açık OIDC id_token, içerik/varlık kimlikleri) kamuya açıktır — elle doğrulayın.`
+        : `İstemciye sunulan HTML/JS içeriğinde ${sig.title} kalıbı bulundu. Bu, sabit kodlanmış bir sırdır ve derhal iptal edilmelidir.`,
+    remediation:
+      (sig.confidence ?? "firm") === "tentative"
+        ? "Gerçekten gizli bir değerse kaynaktan kaldırın ve döndürün (rotate); kamuya açık (public) bir anahtarsa görmezden gelin. İstemci tarafına gizli sır koymayın."
+        : "Sırrı kaynaktan kaldırın ve HEMEN döndürün (rotate). İstemci tarafına sır koymayın; gizli değerleri sunucu tarafında tutun.",
     references: [sig.ref ?? OWASP_SECRETS],
     confidence: sig.confidence ?? "firm",
     evaluate(ev) {
@@ -264,7 +274,11 @@ const OTHER: Check[] = [
     references: ["https://owasp.org/www-community/vulnerabilities/Information_exposure_through_query_strings_in_url"],
     evaluate(ev) {
       const comments = ev.root.body.match(/<!--([\s\S]*?)-->/g) ?? [];
-      const hit = comments.find((c) => /(TODO|FIXME|password|passwd|secret|api[_-]?key|internal|debug|staging|localhost|BUG)/i.test(c));
+      // High-signal only: secret assignments, private keys, embedded creds, or
+      // internal hostnames/IPs. Bare words like 'internal'/'debug' are noise.
+      const SENSITIVE =
+        /((?:password|passwd|pwd|secret|api[_-]?key|apikey|token|access[_-]?key)\s*[:=]\s*\S|BEGIN [A-Z ]*PRIVATE KEY|https?:\/\/[^\s:@]+:[^\s:@]+@|\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\.?\d{0,3}|\blocalhost:\d|\.(?:internal|local|corp)\b)/i;
+      const hit = comments.find((c) => SENSITIVE.test(c));
       return hit ? { status: "fail", location: ev.root.url, evidence: hit.slice(0, 160), confidence: "tentative" } : { status: "pass" };
     },
   },

@@ -122,6 +122,10 @@ model Scan {
   grade      String? // A..F
   pagesCrawled  Int @default(0)
   requestsMade  Int @default(0)
+  // Coverage report (checks run / passed / failed per category). Persisted so a
+  // reloaded completed scan can still show "X ran, Y passed" — the trust signal —
+  // instead of losing it with the live "done" event.
+  coverage   Json?
 
   error String?
 
@@ -161,6 +165,7 @@ model Finding {
 
   @@index([scanId])
   @@index([severity])
+  @@index([category])
 }
 
 // Append-only event log — also the source of the live "Matrix" stream replay.

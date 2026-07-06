@@ -31,13 +31,19 @@ export const CACHE_CHECKS: Check[] = [
     severity: "MEDIUM",
     cwe: "CWE-525",
     owasp: "A04:2021 Insecure Design",
-    description: "Set-Cookie taşıyan yanıt Cache-Control: public (veya s-maxage) içeriyor; bir CDN/proxy, bir kullanıcının kişisel yanıtını başkasına sunabilir.",
+    description: "Oturum/kimlik çerezi ayarlayan bir yanıt Cache-Control: public (veya s-maxage) içeriyor; bir CDN/proxy, bir kullanıcının kişisel yanıtını başkasına sunabilir.",
     remediation: "Kimliklendirilmiş yanıtlarda public/s-maxage kullanmayın; no-store veya private uygulayın.",
     references: [MDN_CACHE],
     evaluate(ev) {
-      if (ev.root.setCookies.length === 0) return null;
+      // Only a *session/auth* cookie makes the response user-specific. Consent /
+      // analytics cookies (consent, _ga, _cf_bm, _gid…) do not — ignore them.
+      const sessiony = ev.root.setCookies.some((c) => {
+        const name = c.split("=")[0]?.trim() ?? "";
+        return /(session|sess|sid|auth|jwt|login|token|remember|sso|phpsessid|jsessionid|connect\.sid)/i.test(name);
+      });
+      if (!sessiony) return null;
       const cc = (ev.root.headers["cache-control"] ?? "").toLowerCase();
-      return /\bpublic\b|s-maxage/.test(cc) ? { status: "fail", location: ev.root.url, confidence: "firm", evidence: `Set-Cookie + Cache-Control: ${cc}` } : { status: "pass" };
+      return /\bpublic\b|s-maxage/.test(cc) ? { status: "fail", location: ev.root.url, confidence: "firm", evidence: `Oturum çerezi + Cache-Control: ${cc}` } : { status: "pass" };
     },
   },
   {

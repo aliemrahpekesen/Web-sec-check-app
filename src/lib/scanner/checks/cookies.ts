@@ -43,7 +43,11 @@ function cookies(ev: Evidence): Cookie[] {
   return all.map(parse);
 }
 
-const SESSION_NAMES = /(session|sess|sid|auth|token|jwt|csrf|xsrf|remember|login|user|account)/i;
+// Names that indicate an actual session/auth credential (not UI preferences).
+const SESSION_NAMES = /(session|sess|sid|auth|jwt|remember|login|sso|access[_-]?token|refresh[_-]?token|phpsessid|jsessionid|connect\.sid|_session)/i;
+// CSRF/XSRF cookies are intentionally JS-readable (double-submit pattern); they
+// must NOT be required to be HttpOnly.
+const CSRF_NAMES = /csrf|xsrf/i;
 
 function perCookie(
   id: string,
@@ -176,7 +180,7 @@ export const COOKIE_CHECKS: Check[] = [
       remediation: "Oturum çerezlerini Secure; HttpOnly; SameSite=Lax ile ayarlayın.",
       references: [MDN],
     },
-    (c, ev) => SESSION_NAMES.test(c.name) && (!(c.httpOnly) || (isHttps(ev) && !c.secure)),
+    (c, ev) => !CSRF_NAMES.test(c.name) && SESSION_NAMES.test(c.name) && (!c.httpOnly || (isHttps(ev) && !c.secure)),
     (c) => `Set-Cookie: ${c.raw}`,
   ),
   perCookie(

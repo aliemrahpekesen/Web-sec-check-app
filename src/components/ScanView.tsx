@@ -207,7 +207,7 @@ export function ScanView({ scanId }: { scanId: string }) {
 
           {/* Report */}
           <section>
-            <Report scan={effective} counts={counts} running={running} coverage={summary?.coverage ?? null} />
+            <Report scan={effective} counts={counts} running={running} coverage={summary?.coverage ?? base?.coverage ?? null} />
           </section>
         </div>
       </div>

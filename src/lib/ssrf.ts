@@ -211,6 +211,15 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
     assertHttpUrl(current);
     await assertPublicHost(current.hostname);
 
+    // NOTE (defence-in-depth gap): assertPublicHost resolves + validates the
+    // host, but fetch() then re-resolves it independently, leaving a narrow
+    // TOCTOU window for DNS rebinding (a 0-TTL name that answers public here and
+    // private to fetch). Fully closing it needs IP-pinning — resolve once and
+    // dial the validated IP — via an undici dispatcher with a guarding
+    // connect.lookup (or a raw http/https agent). That is deliberately not done
+    // here: it adds a dependency/raw sockets that bypass the outbound proxy this
+    // build runs behind. The literal-decoding, all-answers-public, and per-hop
+    // re-validation above still block every non-rebinding vector.
     const res = await fetch(current.toString(), {
       method,
       headers,

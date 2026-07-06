@@ -17,6 +17,10 @@ export interface EngineResult {
   pagesCrawled: number;
   requestsMade: number;
   coverage?: Coverage;
+  // True when the request/time budget ran out mid-scan: some checks saw
+  // incomplete evidence (N/A rather than a real verdict), so absence-of-finding
+  // must not be read as verified-clean.
+  truncated?: boolean;
 }
 
 export async function deterministicScan(
@@ -62,11 +66,24 @@ export async function deterministicScan(
     .map(([cat, c]) => `${CATEGORY_LABELS[cat as keyof typeof CATEGORY_LABELS] ?? cat}: ${c.failed}/${c.run}`)
     .join(" · ");
   await emit({ type: "log", level: "info", message: `Kapsam — ${parts}` });
+
+  // If the budget/deadline ran out, evidence collection was cut short and some
+  // checks ran against partial data — warn so the reader doesn't over-trust the
+  // "clean" verdicts.
+  const truncated = budget.expired() || budget.count >= budget.max;
+  if (truncated) {
+    await emit({
+      type: "log",
+      level: "warn",
+      message: `İstek/zaman bütçesi doldu (${budget.count}/${budget.max} istek); tarama erken kesildi ve bazı kontroller eksik kanıtla çalıştı. Bulgu olmaması "temiz" olarak yorumlanmamalı.`,
+    });
+  }
+
   await emit({
     type: "log",
     level: "success",
     message: `Tarama tamamlandı. ${coverage.total} kontrol koştu, ${coverage.passed} geçti, ${findings.length} bulgu, ${budget.count} istek.`,
   });
 
-  return { findings, pagesCrawled: ev.pages.length, requestsMade: budget.count, coverage };
+  return { findings, pagesCrawled: ev.pages.length, requestsMade: budget.count, coverage, truncated };
 }

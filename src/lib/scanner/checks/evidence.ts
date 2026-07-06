@@ -27,6 +27,22 @@ function toPage(res: HttpResult): PageEvidence {
 
 // ---- TLS deep inspection ----------------------------------------------------
 
+// Node's getCipher() no longer reports key bits, so derive the symmetric
+// strength from the negotiated suite name (the bulk-cipher token, never the SHA
+// MAC — "AES128-GCM-SHA256" is 128-bit, not 256). Undefined when unrecognised.
+function cipherBitsFromName(name?: string): number | undefined {
+  if (!name) return undefined;
+  const n = name.toUpperCase();
+  if (/AES[_-]?256|CHACHA20/.test(n)) return 256;
+  if (/AES[_-]?128/.test(n)) return 128;
+  if (/3DES|DES[_-]?CBC3|DES[_-]?EDE/.test(n)) return 112;
+  if (/EXP(ORT)?|[_-]40[_-]/.test(n)) return 40;
+  if (/RC4/.test(n)) return 128; // nominal; still flagged by crypto-weak-cipher
+  if (/(^|[^A-Z0-9])DES([_-]|$)/.test(n)) return 56;
+  if (/NULL/.test(n)) return 0;
+  return undefined;
+}
+
 function deepTls(host: string): Promise<TlsEvidence> {
   return new Promise((resolve) => {
     let done = false;
@@ -51,7 +67,7 @@ function deepTls(host: string): Promise<TlsEvidence> {
         reachable: true,
         protocol,
         cipherName: cipher?.name,
-        cipherBits: (cipher as { bits?: number })?.bits,
+        cipherBits: (cipher as { bits?: number })?.bits ?? cipherBitsFromName(cipher?.name),
         validFrom: cert?.valid_from,
         validTo: cert?.valid_to,
         daysToExpiry,
@@ -61,7 +77,9 @@ function deepTls(host: string): Promise<TlsEvidence> {
         subjectCN,
         altNames: san ? san.split(/,\s*/).map((s) => s.replace(/^DNS:/, "")) : undefined,
         keyBits: (cert as { bits?: number })?.bits,
-        sigAlg: (cert as { sigalg?: string })?.sigalg,
+        // Note: Node's TLS/X509 API exposes no signature-algorithm field, so
+        // sigAlg is intentionally not collected (the SHA-1/MD5 check was removed
+        // rather than shipped permanently N/A).
         selfSigned,
         san,
       });
@@ -76,6 +94,26 @@ function deepTls(host: string): Promise<TlsEvidence> {
 }
 
 // ---- DNS + email security ---------------------------------------------------
+
+async function tryResolve<T>(fn: () => Promise<T[]>): Promise<{ ok: boolean; value: T[] | null }> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+// Approximate registrable ("org") domain without a full public-suffix list.
+// Handles the common two-level TLDs (co.uk, com.tr, …) so DMARC/CAA tree-climbing
+// from a subdomain reaches the right apex.
+const TWO_LEVEL_SLD = new Set(["co", "com", "org", "net", "gov", "edu", "ac", "gob", "go", "or", "ne", "in", "gen"]);
+function registrableDomain(host: string): string {
+  const parts = host.split(".").filter(Boolean);
+  if (parts.length <= 2) return host;
+  const secondToLast = parts[parts.length - 2];
+  if (TWO_LEVEL_SLD.has(secondToLast) && parts.length >= 3) return parts.slice(-3).join(".");
+  return parts.slice(-2).join(".");
+}
 
 async function collectDns(host: string): Promise<DnsEvidence> {
   const out: DnsEvidence = { resolved: false, a: [], aaaa: [], mx: [], ns: [], txt: [], caa: [] };
@@ -103,10 +141,25 @@ async function collectDns(host: string): Promise<DnsEvidence> {
   }
   out.txtResolved = txts !== null;
   out.txt = (txts ?? []).map((chunks) => chunks.join(""));
-  out.caa = (await safe(dns.resolveCaa(host), [])).map((c) => JSON.stringify(c));
   out.spf = out.txt.find((t) => /^v=spf1/i.test(t));
-  const dmarcTxt = await safe(dns.resolveTxt(`_dmarc.${host}`), []);
-  out.dmarc = dmarcTxt.map((c) => c.join("")).find((t) => /^v=DMARC1/i.test(t));
+
+  const org = registrableDomain(host);
+
+  // CAA lives at the exact name OR any ancestor up to the org domain (RFC 8659
+  // tree-climbing). Query the host and the org domain; caaResolved is false only
+  // if BOTH lookups errored (so "missing" isn't concluded from a failed lookup).
+  const caaHost = await tryResolve(() => dns.resolveCaa(host));
+  const caaOrg = org !== host ? await tryResolve(() => dns.resolveCaa(org)) : caaHost;
+  out.caaResolved = caaHost.ok || caaOrg.ok;
+  out.caa = [...(caaHost.value ?? []), ...(caaOrg.value ?? [])].map((c) => JSON.stringify(c));
+
+  // DMARC is published at _dmarc.<domain>; receivers fall back to the org domain
+  // for subdomains. Check both; dmarcResolved is false only if both lookups fail.
+  const dmarcHost = await tryResolve(() => dns.resolveTxt(`_dmarc.${host}`));
+  const dmarcOrg = org !== host ? await tryResolve(() => dns.resolveTxt(`_dmarc.${org}`)) : dmarcHost;
+  out.dmarcResolved = dmarcHost.ok || dmarcOrg.ok;
+  const dmarcRecords = [...(dmarcHost.value ?? []), ...(dmarcOrg.value ?? [])].map((c) => c.join(""));
+  out.dmarc = dmarcRecords.find((t) => /^v=DMARC1/i.test(t));
   out.dmarcPolicy = out.dmarc ? /p=(\w+)/i.exec(out.dmarc)?.[1]?.toLowerCase() : undefined;
   const mtaSts = await safe(dns.resolveTxt(`_mta-sts.${host}`), []);
   out.mtaSts = mtaSts.some((c) => /v=STSv1/i.test(c.join("")));
@@ -311,29 +364,58 @@ async function probeGraphql(origin: string, budget: RequestBudget): Promise<Evid
       headers: { "Content-Type": "application/json" },
       body: query,
     });
-    if (res.error) continue;
-    const looksGraphql = /"data"|"errors"|__schema|queryType|GraphQL/i.test(res.body);
-    if (res.status < 500 && looksGraphql) {
-      const introspectionEnabled = /"__schema"|"queryType"/.test(res.body) && !/introspection is disabled|GraphQL introspection is not allowed/i.test(res.body);
-      return { endpoint: `${origin}${ep}`, reachable: true, introspectionEnabled };
+    if (res.error || res.status >= 500) continue;
+    // Parse JSON and require a genuine GraphQL envelope — a plain REST route that
+    // merely contains the word "data"/"errors" must NOT be classified as GraphQL,
+    // and introspection is "enabled" ONLY if data.__schema is a non-null object.
+    let json: unknown;
+    try {
+      json = JSON.parse(res.body);
+    } catch {
+      continue;
     }
+    if (!json || typeof json !== "object") continue;
+    const obj = json as { data?: unknown; errors?: unknown };
+    const dataObj = obj.data && typeof obj.data === "object" ? (obj.data as Record<string, unknown>) : null;
+    const schema = dataObj ? dataObj.__schema : undefined;
+    const introspectionEnabled = !!schema && typeof schema === "object";
+    const gqlErrors =
+      Array.isArray(obj.errors) &&
+      (obj.errors as Array<Record<string, unknown>>).some(
+        (e) => e && (e.locations || e.extensions || /Cannot query|must be|GraphQL|__schema|introspection|Syntax Error/i.test(String(e.message ?? ""))),
+      );
+    const graphqlShaped = introspectionEnabled || (dataObj !== null && "__schema" in dataObj) || gqlErrors;
+    if (!graphqlShaped) continue;
+    return { endpoint: `${origin}${ep}`, reachable: true, introspectionEnabled };
   }
   return null;
 }
 
 // robots.txt mining: probe Disallow'd paths; return the ones publicly reachable.
-async function mineRobots(origin: string, budget: RequestBudget): Promise<string[]> {
+// Applies the same soft-404 / app-shell suppression as probePaths, so an SPA
+// that returns its index for /admin isn't reported as an exposed hidden path.
+async function mineRobots(origin: string, budget: RequestBudget, rootTitle: string): Promise<string[]> {
   const res = await httpGet(`${origin}/robots.txt`, { budget, redirect: "manual" });
   if (res.error || res.status !== 200 || !/disallow/i.test(res.body)) return [];
   const disallowed = [...res.body.matchAll(/^\s*Disallow:\s*(\S+)/gim)]
     .map((m) => m[1])
     .filter((p) => p && p !== "/" && !p.includes("*"))
     .slice(0, 20);
+  const base = await httpGet(`${origin}/sentinel-nx-r0b0ts-4c1`, { budget, redirect: "manual" });
+  const baseline = base.error ? null : { status: base.status, len: base.body.length };
+  const catchAll = baseline?.status === 200;
+  const rootSegs = new Set(titleSegs(rootTitle));
   const accessible: string[] = [];
   for (const p of disallowed) {
     if (budget.expired()) break;
     const r = await httpGet(`${origin}${p}`, { budget, redirect: "manual" });
-    if (!r.error && r.status === 200 && r.body.length > 0) accessible.push(p);
+    if (r.error || r.status !== 200 || r.body.length === 0) continue;
+    if (baseline && r.status === baseline.status && Math.abs(r.body.length - baseline.len) <= Math.max(64, baseline.len * 0.15)) continue;
+    if (isHtmlResp(r)) {
+      if (catchAll) continue;
+      if (titleSegs(pageTitle(r.body)).some((s) => rootSegs.has(s))) continue;
+    }
+    accessible.push(p);
   }
   return accessible;
 }
@@ -453,7 +535,7 @@ export async function collectEvidence(
   let robotsDisallow: string[] = [];
   if (profile !== "PASSIVE") {
     graphql = await probeGraphql(origin, budget);
-    robotsDisallow = await mineRobots(origin, budget);
+    robotsDisallow = await mineRobots(origin, budget, root.title);
     if (robotsDisallow.length) {
       await emit({ type: "log", level: "info", message: `robots.txt madenciliği: ${robotsDisallow.length} gizli ama erişilebilir yol.` });
     }
